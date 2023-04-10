@@ -124,6 +124,7 @@ dependencies = [
  "anyhow",
  "clap",
  "itertools",
+ "once_cell",
 ]
 
 [[package]]
