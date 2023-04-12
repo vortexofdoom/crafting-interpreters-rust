@@ -11,6 +11,8 @@ use self::ast::{parse, Precedence};
 
 mod ast;
 
+pub type Parsed<T> = ((usize, usize), Result<T>);
+
 #[derive(Debug, Parser)]
 pub struct LoxArgs {
     /// Path to complete lox file.
@@ -132,7 +134,7 @@ impl Token {
             Token::CharThenEqual('=' | '!') => Precedence::Equality,
             Token::CharThenEqual('<' | '>') | Token::OneChar('<' | '>') => Precedence::Comparison,
             Token::OneChar('+') => Precedence::Term,
-            Token::OneChar('*' | '/') => Precedence::Term,
+            Token::OneChar('*' | '/') => Precedence::Factor,
             Token::OneChar('-' | '!') => Precedence::Unary,
             Token::Identifier(_) | Token::String(_) | Token::Number(_) => Precedence::Primary,
             _ => todo!(),
@@ -140,33 +142,26 @@ impl Token {
     }
 
     #[rustfmt::skip]
-    pub fn matches_precedence(&self, p: Precedence) -> bool {
-        matches!((self, p),
-            (Token::CharThenEqual('=') | Token::CharThenEqual('!'), Precedence::Equality)
-            | (Token::CharThenEqual('<' | '>') | Token::OneChar('<' | '>'),Precedence::Comparison,)
-            | (Token::OneChar('+' | '-'), Precedence::Term)
-            | (Token::OneChar('*' | '/'), Precedence::Factor)
-            | (Token::OneChar('-' | '!'), Precedence::Unary)
-            | (Token::String(_) | Token::Number(_) | Token::Identifier(_), Precedence::Primary)
-        )
+    pub fn matches_precedence(&self, precedence: Precedence) -> bool {
+        self.highest_valid_precedence() >= precedence
     }
 }
 
 #[derive(Debug)]
 pub enum ParseError {
-    UnclosedString(usize),
-    ParseNumError(usize, String),
-    InvalidToken(usize, char),
+    UnclosedString,
+    ParseNumError(String),
+    InvalidToken(char),
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::UnclosedString(i) => {
-                write!(f, "{i}: end of line reached with no closing '\"' found")
+            ParseError::UnclosedString => {
+                write!(f, "end of line reached with no closing '\"' found")
             }
-            ParseError::ParseNumError(i, s) => write!(f, "{i}: error parsing number '{s}'"),
-            ParseError::InvalidToken(i, c) => write!(f, "{i}: invalid token '{c}'"),
+            ParseError::ParseNumError(s) => write!(f, "error parsing number '{s}'"),
+            ParseError::InvalidToken(c) => write!(f, "invalid token '{c}'"),
         }
     }
 }
@@ -196,55 +191,54 @@ pub fn run_prompt() -> Result<()> {
 }
 
 fn run(source: &str) -> Result<()> {
-    let exprs = parse(&mut scan_tokens(source).into_iter().multipeek());
-    let (ok, err): (Vec<_>, Vec<_>) = exprs.into_iter().partition(|r| r.is_ok());
+    let tokens = scan_tokens(source);
 
-    if err.is_empty() {
-        for r in ok {
-            println!("{:#?}", r.unwrap());
-        }
-    } else {
-        for r in err {
-            println!("{:#?}", r);
-        }
-    }
-
-    // for r in scan_tokens(source) {
+    // for r in tokens.iter() {
     //     match r {
     //         // just printing for now
     //         Ok(t) => println!("{t}"),
     //         Err(e) => println!("{e}"),
     //     }
     // }
+
+    let exprs = parse(&mut tokens.into_iter().multipeek());
+    let (ok, err): (Vec<_>, Vec<_>) = exprs.into_iter().partition(|(_, r)| r.is_ok());
+
+    if err.is_empty() {
+        for (_, r) in ok {
+            println!("{}", r.unwrap());
+        }
+    } else {
+        for ((row, col), r) in err {
+            println!("Error at line {row}, {col}: {:?}", r);
+        }
+    }
+
     Ok(())
 }
 
-fn scan_tokens(source: &str) -> Vec<Result<Token>> {
+fn scan_tokens(source: &str) -> Vec<Parsed<Token>> {
     source
         .lines()
         .enumerate()
         .flat_map(|(i, l)| {
-            let (tokens, errors): (Vec<_>, Vec<_>) = scan_line(l).partition(|r| r.is_ok());
+            let (tokens, errors): (Vec<_>, Vec<_>) = scan_line(l)
+                .map(|(j, r)| ((i, j), r))
+                .partition(|(_, r)| r.is_ok());
             if errors.is_empty() {
                 tokens
             } else {
                 errors
                     .into_iter()
-                    .filter_map(|r| {
-                        if let Err(e) = r {
-                            Some(Err(anyhow!("Error at line {}, {e}", i + 1)))
-                        } else {
-                            None
-                        }
-                    })
+                    .filter_map(|r| if let Err(_) = r.1 { Some(r) } else { None })
                     .collect()
             }
         })
         .collect()
 }
 
-fn scan_line(line: &str) -> impl Iterator<Item = Result<Token>> {
-    let mut chars = line.chars().enumerate().multipeek();
+fn scan_line(line: &str) -> impl Iterator<Item = (usize, Result<Token>)> {
+    let mut chars = line.char_indices().map(|(i, c)| (i + 1, c)).multipeek();
     let mut tokens = vec![];
     while let Some(res) = scan_token(&mut chars) {
         tokens.push(res);
@@ -252,19 +246,21 @@ fn scan_line(line: &str) -> impl Iterator<Item = Result<Token>> {
     tokens.into_iter()
 }
 
-fn scan_token(chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>) -> Option<Result<Token>> {
+fn scan_token(
+    chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>,
+) -> Option<(usize, Result<Token>)> {
     if let Some((i, c)) = chars.next() {
         match c {
             // Invariably single char tokens
             '(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*' => {
-                Some(Ok(Token::OneChar(c)))
+                Some((i, Ok(Token::OneChar(c))))
             }
             '!' | '=' | '<' | '>' => {
                 if let Some(&(_, '=')) = chars.peek() {
                     chars.next();
-                    Some(Ok(Token::CharThenEqual(c)))
+                    Some((i, Ok(Token::CharThenEqual(c))))
                 } else {
-                    Some(Ok(Token::OneChar(c)))
+                    Some((i, Ok(Token::OneChar(c))))
                 }
             }
             '/' => {
@@ -272,7 +268,7 @@ fn scan_token(chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>) -> Opt
                     // another slash means we have a comment and can ignore the rest of the line after this point
                     None
                 } else {
-                    Some(Ok(Token::OneChar('/')))
+                    Some((i, Ok(Token::OneChar('/'))))
                 }
             }
             '"' => {
@@ -281,15 +277,15 @@ fn scan_token(chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>) -> Opt
                     .map(|(_, c)| c)
                     .collect();
                 if let Some((_, '"')) = chars.next() {
-                    Some(Ok(Token::String(string)))
+                    Some((i, Ok(Token::String(string))))
                 } else {
-                    Some(Err(anyhow!(ParseError::UnclosedString(i + 1))))
+                    Some((i, Err(anyhow!(ParseError::UnclosedString))))
                 }
             }
-            x if x.is_ascii_digit() => Some(parse_number(c, i + 1, chars)),
-            a if a == '_' || a.is_ascii_alphabetic() => Some(parse_identifier(c, i + 1, chars)),
+            x if x.is_ascii_digit() => Some(parse_number(i, c, chars)),
+            a if a == '_' || a.is_ascii_alphabetic() => Some(parse_identifier(i, c, chars)),
             w if w.is_whitespace() => scan_token(chars),
-            _ => Some(Err(anyhow!(ParseError::InvalidToken(i + 1, c)))),
+            _ => Some((i, Err(anyhow!(ParseError::InvalidToken(c))))),
         }
     } else {
         None
@@ -297,10 +293,10 @@ fn scan_token(chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>) -> Opt
 }
 
 fn parse_number(
-    first: char,
     start: usize,
+    first: char,
     chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>,
-) -> Result<Token> {
+) -> (usize, Result<Token>) {
     let mut end = start;
     let prefix = chars
         .peeking_take_while(|(_, c)| c.is_ascii_digit())
@@ -308,29 +304,26 @@ fn parse_number(
     let mut string: String = std::iter::once(first).chain(prefix).collect();
     chars.reset_peek();
 
-    if let Some((_, '.')) = chars.peek()
-    && let Some((i, n)) = chars.peek()
-    && n.is_ascii_digit() {
-        end = *i;
-        while let Some((i, c)) = chars.peek() && c.is_ascii_digit() {
-            end *= i;
+    if let Some((_, '.')) = chars.peek() {
+        while let Some((i, n)) = chars.peek()
+        && n.is_ascii_digit() {
+            end = *i;
         }
     }
-    string.extend(chars.take_while(|(i, _)| *i < end).map(|(_, c)| c));
+    string.extend(chars.peeking_take_while(|(i, _)| *i < end).map(|(_, c)| c));
 
-    println!("{string}");
     if let Ok(n) = string.parse::<f64>() {
-        Ok(Token::Number(n))
+        (start, Ok(Token::Number(n)))
     } else {
-        Err(anyhow!(ParseError::ParseNumError(start, string)))
+        (start, Err(anyhow!(ParseError::ParseNumError(string))))
     }
 }
 
 fn parse_identifier(
-    first: char,
     start: usize,
+    first: char,
     chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>,
-) -> Result<Token> {
+) -> (usize, Result<Token>) {
     let mut end = start;
     while let Some(&(i, c)) = chars.peek() && (c.is_ascii_alphanumeric() || c == '_') {
         end = i;
@@ -339,8 +332,8 @@ fn parse_identifier(
         .chain(chars.take(end - start).map(|(_, c)| c))
         .collect();
     if let Some(&k) = KEYWORDS.get(string.as_str()) {
-        Ok(Token::Keyword(k))
+        (start, Ok(Token::Keyword(k)))
     } else {
-        Ok(Token::Identifier(string))
+        (start, Ok(Token::Identifier(string)))
     }
 }
