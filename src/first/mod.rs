@@ -193,27 +193,31 @@ pub fn run_prompt() -> Result<()> {
 fn run(source: &str) -> Result<()> {
     let tokens = scan_tokens(source);
 
-    // for r in tokens.iter() {
-    //     match r {
-    //         // just printing for now
-    //         Ok(t) => println!("{t}"),
-    //         Err(e) => println!("{e}"),
-    //     }
-    // }
-
-    let exprs = parse(&mut tokens.into_iter().multipeek());
-    let (ok, err): (Vec<_>, Vec<_>) = exprs.into_iter().partition(|(_, r)| r.is_ok());
-
-    if err.is_empty() {
-        for (_, r) in ok {
-            println!("{}", r.unwrap());
-        }
-    } else {
-        for ((row, col), r) in err {
-            println!("Error at line {row}, {col}: {:?}", r);
+    for r in tokens.iter() {
+        match r {
+            // just printing for now
+            ((row, col), Ok(t)) => println!("{row}, {col}: {t}"),
+            ((row, col), Err(e)) => println!("{row}, {col}: {e}"),
         }
     }
 
+    let exprs = parse(&mut tokens.into_iter().multipeek());
+    if exprs.iter().all(|r| r.1.is_ok()) {
+        let vals: Vec<_> = exprs
+            .into_iter()
+            .map(|(i, e)| (i, e.and_then(|e| e.evaluate())))
+            .collect();
+        for val in vals {
+            println!("{}", val.1.unwrap());
+        }
+    } else {
+        for ((row, col), r) in exprs {
+            match r {
+                Ok(e) => println!("{e}"),
+                Err(e) => println!("Error at line {row}, {col}: {e}"),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -221,19 +225,7 @@ fn scan_tokens(source: &str) -> Vec<Parsed<Token>> {
     source
         .lines()
         .enumerate()
-        .flat_map(|(i, l)| {
-            let (tokens, errors): (Vec<_>, Vec<_>) = scan_line(l)
-                .map(|(j, r)| ((i, j), r))
-                .partition(|(_, r)| r.is_ok());
-            if errors.is_empty() {
-                tokens
-            } else {
-                errors
-                    .into_iter()
-                    .filter_map(|r| if let Err(_) = r.1 { Some(r) } else { None })
-                    .collect()
-            }
-        })
+        .flat_map(|(i, l)| scan_line(l).map(move |(j, r)| ((i, j), r)))
         .collect()
 }
 
@@ -297,20 +289,23 @@ fn parse_number(
     first: char,
     chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>,
 ) -> (usize, Result<Token>) {
-    let mut end = start;
     let prefix = chars
         .peeking_take_while(|(_, c)| c.is_ascii_digit())
         .map(|(_, c)| c);
     let mut string: String = std::iter::once(first).chain(prefix).collect();
     chars.reset_peek();
 
-    if let Some((_, '.')) = chars.peek() {
-        while let Some((i, n)) = chars.peek()
-        && n.is_ascii_digit() {
-            end = *i;
-        }
+    if let Some((_, '.')) = chars.peek()
+    && let Some((_, n)) = chars.peek()
+    && n.is_ascii_digit() {
+        chars.next();
+        string
+            .extend(
+                std::iter::once('.')
+                .chain(chars.peeking_take_while(|(_, c)| c.is_ascii_digit()).map(|(_, c)| c))
+            );
+
     }
-    string.extend(chars.peeking_take_while(|(i, _)| *i < end).map(|(_, c)| c));
 
     if let Ok(n) = string.parse::<f64>() {
         (start, Ok(Token::Number(n)))
