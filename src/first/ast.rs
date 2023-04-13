@@ -1,37 +1,56 @@
-use std::fmt::Display;
+use std::{collections::HashMap, str::CharIndices};
 
 use anyhow::{anyhow, Result};
-use itertools::{MultiPeek, PeekingNext};
+use hash_chain::ChainMap;
+use itertools::{MultiPeek, PeekingNext, Itertools};
 
-use super::{Parsed, Token};
+use super::{Parsed, Token, ParseError};
+
+pub struct Ast<'a> {
+    names: ChainMap<String, LoxVal>,
+    source: &'a str,
+}
+
+impl<'a> Ast<'a> {
+    pub fn construct(source: &'a str) -> Self {
+        Self {
+            names: ChainMap::new(HashMap::new()),
+            source,
+        }
+    }
+
+    pub fn chars(&mut self) -> MultiPeek<CharIndices<'a>> {
+        self.source.char_indices().multipeek()
+    }
+
+
+fn parse_var_dec(tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>) -> Parsed<Statement> {
+    match tokens.next() {
+        Some(Parsed(lc, Ok(Token::Identifier(name)))) => todo!(),
+        _ => todo!()
+    }
+    if let Some(Parsed(lc, Ok(t))) = tokens.next() {
+
+    }
+    if let Some(Parsed(lc, Ok(Token::Identifier(s)))) = tokens.next() {
+
+    }
+    todo!()
+}
+}
 
 #[derive(Debug)]
 pub enum Expr {
     Grouping(Box<Expr>),
     Binary(Box<BinaryExpr>),
     Unary(Box<UnaryExpr>),
-    Literal(Token),
-}
-
-#[derive(Debug)]
-pub enum AstError {
-    Closing,
-    UnexpectedToken(Token),
-}
-
-impl Display for AstError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AstError::Closing => write!(f, "missing closing ')'"),
-            AstError::UnexpectedToken(t) => write!(f, "unexpected token {t}"),
-        }
-    }
+    Token(Token),
 }
 
 impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Expr::Literal(t) => write!(f, "{t}"),
+            Expr::Token(t) => write!(f, "{t}"),
             Expr::Grouping(e) => write!(f, "{e}"),
             Expr::Binary(b) => write!(f, "({} {} {})", b.left, b.operator, b.right),
             Expr::Unary(u) => {
@@ -53,126 +72,159 @@ pub struct BinaryExpr {
 }
 
 impl BinaryExpr {
-    pub fn evaluate(self) -> Result<Value> {
+    pub fn evaluate(self) -> Result<LoxVal> {
+        use super::Keyword::*;
         match self.operator {
-            Token::OneChar('+') => self.left.evaluate()? + self.right.evaluate()?,
-            Token::OneChar('-') => self.left.evaluate()? - self.right.evaluate()?,
             Token::OneChar('*') => self.left.evaluate()? * self.right.evaluate()?,
             Token::OneChar('/') => self.left.evaluate()? / self.right.evaluate()?,
-            Token::CharThenEqual('=') => Ok(Value::Boolean(
-                self.left.evaluate()? == self.right.evaluate()?,
-            )),
-            Token::CharThenEqual('!') => Ok(Value::Boolean(
-                self.left.evaluate()? != self.right.evaluate()?,
-            )),
+            Token::OneChar('+') => self.left.evaluate()? + self.right.evaluate()?,
+            Token::OneChar('-') => self.left.evaluate()? - self.right.evaluate()?,
+            Token::OneChar('>') => match (self.left.evaluate()?, self.right.evaluate()?) {
+                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x > y)),
+                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
+                    Err(anyhow!("{val} is not a valid number for comparison"))
+                }
+                (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
+            },
+            Token::OneChar('<') => match (self.left.evaluate()?, self.right.evaluate()?) {
+                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x < y)),
+                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
+                    Err(anyhow!("{val} is not a valid number for comparison"))
+                }
+                (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
+            },
             Token::CharThenEqual('>') => match (self.left.evaluate()?, self.right.evaluate()?) {
-                (Value::Number(x), Value::Number(y)) => Ok(Value::Boolean(x >= y)),
-                (Value::Number(_), val) | (val, Value::Number(_)) => {
+                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x >= y)),
+                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
                     Err(anyhow!("{val} is not a valid number for comparison"))
                 }
                 (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
             },
             Token::CharThenEqual('<') => match (self.left.evaluate()?, self.right.evaluate()?) {
-                (Value::Number(x), Value::Number(y)) => Ok(Value::Boolean(x <= y)),
-                (Value::Number(_), val) | (val, Value::Number(_)) => {
+                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x <= y)),
+                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
                     Err(anyhow!("{val} is not a valid number for comparison"))
                 }
                 (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
+            },
+            Token::CharThenEqual('=') => Ok(LoxVal::Boolean(
+                self.left.evaluate()? == self.right.evaluate()?,
+            )),
+            Token::CharThenEqual('!') => Ok(LoxVal::Boolean(
+                self.left.evaluate()? != self.right.evaluate()?,
+            )),
+            Token::Keyword(And) => {
+                let left = self.left.evaluate()?;
+                if !left.truthy() {
+                    Ok(left)
+                } else {
+                    self.right.evaluate()
+                }
+            },
+            Token::Keyword(Or) => {
+                let left = self.left.evaluate()?;
+                if left.truthy() {
+                    Ok(left)
+                } else {
+                    self.right.evaluate()
+                }
             },
             _ => Err(anyhow!("{} is not a valid binary operator", self.operator)),
         }
     }
 }
 
+
+
 #[derive(Debug)]
-pub enum Value {
+pub enum LoxVal {
     String(String),
     Number(f64),
     Boolean(bool),
     Nil,
 }
 
-impl Value {
+impl LoxVal {
     fn truthy(&self) -> bool {
         match self {
-            Value::String(_) => true,
-            Value::Number(_) => true,
-            Value::Boolean(b) => *b,
-            Value::Nil => false,
+            LoxVal::String(_) => true,
+            LoxVal::Number(_) => true,
+            LoxVal::Boolean(b) => *b,
+            LoxVal::Nil => false,
         }
     }
 }
 
-impl std::fmt::Display for Value {
+impl std::fmt::Display for LoxVal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::String(s) => write!(f, "{s}"),
-            Value::Number(n) => write!(f, "{n}"),
-            Value::Boolean(_) => todo!(),
-            Value::Nil => todo!(),
+            LoxVal::String(s) => write!(f, "{s}"),
+            LoxVal::Number(n) => write!(f, "{n}"),
+            LoxVal::Boolean(_) => todo!(),
+            LoxVal::Nil => todo!(),
         }
     }
 }
 
-impl std::ops::Add<Value> for Value {
-    type Output = Result<Value>;
-    fn add(self, rhs: Value) -> Self::Output {
+impl std::ops::Add<LoxVal> for LoxVal {
+    type Output = Result<LoxVal>;
+    fn add(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (Value::String(_), _) | (_, Value::String(_)) => {
-                Ok(Value::String(format!("{self}{rhs}")))
+            (LoxVal::String(_), _) | (_, LoxVal::String(_)) => {
+                Ok(LoxVal::String(format!("{self}{rhs}")))
             }
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
+            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x + y)),
             _ => Err(anyhow!("cannot add {self} and {rhs}")),
         }
     }
 }
 
-impl std::ops::Sub<Value> for Value {
-    type Output = Result<Value>;
-    fn sub(self, rhs: Value) -> Self::Output {
+impl std::ops::Sub<LoxVal> for LoxVal {
+    type Output = Result<LoxVal>;
+    fn sub(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x - y)),
+            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x - y)),
             _ => Err(anyhow!("cannot subtract {rhs} from {self}")),
         }
     }
 }
 
-impl std::ops::Mul<Value> for Value {
-    type Output = Result<Value>;
-    fn mul(self, rhs: Value) -> Self::Output {
+impl std::ops::Mul<LoxVal> for LoxVal {
+    type Output = Result<LoxVal>;
+    fn mul(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x * y)),
+            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x * y)),
             _ => Err(anyhow!("cannot multiply {self} and {rhs}")),
         }
     }
 }
 
-impl std::ops::Div<Value> for Value {
-    type Output = Result<Value>;
-    fn div(self, rhs: Value) -> Self::Output {
+impl std::ops::Div<LoxVal> for LoxVal {
+    type Output = Result<LoxVal>;
+    fn div(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x / y)),
+            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x / y)),
             _ => Err(anyhow!("cannot divide {self} and {rhs}")),
         }
     }
 }
 
-impl PartialEq for Value {
+impl PartialEq for LoxVal {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Boolean(l), Value::Boolean(r)) => l == r,
-            (Value::Number(l), Value::Number(r)) => l == r,
-            (Value::String(l), Value::String(r)) => l == r,
-            (Value::Nil, Value::Nil) => true,
+            (LoxVal::Boolean(l), LoxVal::Boolean(r)) => l == r,
+            (LoxVal::Number(l), LoxVal::Number(r)) => l == r,
+            (LoxVal::String(l), LoxVal::String(r)) => l == r,
+            (LoxVal::Nil, LoxVal::Nil) => true,
             _ => false,
         }
     }
 }
 
-impl std::cmp::PartialOrd for Value {
+impl std::cmp::PartialOrd for LoxVal {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (Value::Number(x), Value::Number(y)) => x.partial_cmp(y),
+            (LoxVal::Number(x), LoxVal::Number(y)) => x.partial_cmp(y),
             _ => None,
         }
     }
@@ -185,11 +237,11 @@ pub struct UnaryExpr {
 }
 
 impl UnaryExpr {
-    pub fn evaluate(self) -> Result<Value> {
+    pub fn evaluate(self) -> Result<LoxVal> {
         if let Some(t) = self.operator {
             match (t, self.right.evaluate()?) {
-                (Token::OneChar('!'), o) => Ok(Value::Boolean(!o.truthy())),
-                (Token::OneChar('-'), Value::Number(n)) => Ok(Value::Number(-n)),
+                (Token::OneChar('!'), o) => Ok(LoxVal::Boolean(!o.truthy())),
+                (Token::OneChar('-'), LoxVal::Number(n)) => Ok(LoxVal::Number(-n)),
                 (Token::OneChar('-'), o) => Err(anyhow!("cannot negate {o}")),
                 (t, _) => Err(anyhow!("{t} is not a valid unary operator")),
             }
@@ -216,34 +268,64 @@ impl Expr {
         Self::Grouping(Box::new(self))
     }
 
-    pub fn evaluate(self) -> Result<Value> {
+    pub fn evaluate(self) -> Result<LoxVal> {
         use super::Keyword::*;
         match self {
             Expr::Grouping(e) => e.evaluate(),
             Expr::Binary(b) => b.evaluate(),
             Expr::Unary(u) => u.evaluate(),
-            Expr::Literal(o) => match o {
-                Token::String(s) => Ok(Value::String(s)),
-                Token::Keyword(True) => Ok(Value::Boolean(true)),
-                Token::Keyword(False) => Ok(Value::Boolean(false)),
-                Token::Keyword(Nil) => Ok(Value::Nil),
-                Token::Number(n) => Ok(Value::Number(n)),
+            Expr::Token(o) => match o {
+                Token::String(s) => Ok(LoxVal::String(s)),
+                Token::Number(n) => Ok(LoxVal::Number(n)),
+                Token::Identifier(s) => todo!(),
+                Token::Keyword(True) => Ok(LoxVal::Boolean(true)),
+                Token::Keyword(False) => Ok(LoxVal::Boolean(false)),
+                Token::Keyword(Nil) => Ok(LoxVal::Nil),
+                Token::Keyword(This) => todo!(),
+                Token::Keyword(Class) => todo!(),
+                Token::Keyword(_) => todo!(),
                 _ => todo!(),
             },
         }
     }
 }
 
-pub fn parse(tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>) -> Vec<Parsed<Expr>> {
-    let mut expressions = vec![];
-    while let Some(expr) = parse_expr(tokens) {
-        expressions.push(expr);
+pub fn parse(tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>) -> MultiPeek<impl Iterator<Item = Parsed<Statement>>> {
+    use super::Keyword::*;
+    // Maybe try to do this with a map instead of pushing to a vec
+    let mut statements = vec![];
+    while let Some(Parsed(lc, Ok(token))) = tokens.next() {
+        statements.push(match token {
+            Token::Keyword(Var) => todo!(),//parse_var_dec(tokens),
+            Token::Keyword(Print) => todo!(),
+            Token::CharThenEqual(_) => todo!(),
+            Token::Identifier(_) => todo!(),
+            Token::String(_) => todo!(),
+            Token::Number(_) => todo!(),
+            _ => todo!(),
+        });
+        // match (parse_expr(tokens), tokens.next()) {
+        //     (Some(Parsed(_, Ok(expr))), Some(Parsed(_, Ok(Token::OneChar(';'))))) => if token == Token::Keyword(Print) {
+        //         statements.push(Parsed(lc, Ok(Statement::Print(expr))))
+        //     } else {
+        //         statements.push(Parsed(lc, Ok(Statement::Expression(expr))))
+        //     },
+        //     (Some(Parsed(lc, Ok(expr))), None) => statements.push(Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))),
+        //     (Some(Parsed(_, Ok(_))), Some(Parsed(lc, Ok(t)))) => statements.push(Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t))))),
+        //     (Some(Parsed(_, Ok(_))), Some(err)) => statements.push(Parsed::from_parsed(err)),
+        //     (Some(err), _) => statements.push(Parsed::from_parsed(err)),
+        //     (None, None) => statements.push(Parsed(lc, Err(anyhow!(ParseError::StatementMissingExpr)))),
+        // }
     }
-    expressions
+    statements.into_iter().multipeek()
 }
+
+
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum Precedence {
+    Or,
+    And,
     Equality,
     Comparison,
     Term,
@@ -255,6 +337,8 @@ pub enum Precedence {
 impl Precedence {
     fn next_highest(&self) -> Self {
         match self {
+            Precedence::Or => Precedence::And,
+            Precedence::And => Precedence::Equality,
             Precedence::Equality => Precedence::Comparison,
             Precedence::Comparison => Precedence::Term,
             Precedence::Term => Precedence::Factor,
@@ -275,21 +359,21 @@ fn parse_binary_expr(
 ) -> Option<Parsed<Expr>> {
     if precedence < Precedence::Unary {
         parse_binary_expr(precedence.next_highest(), tokens).map(|res| {
-            if let (lc, Ok(mut expr)) = res {
-                while let Some((_, Ok(op))) = tokens.peeking_next(|(_, r)| {
+            if let Parsed(lc, Ok(mut expr)) = res {
+                while let Some(Parsed(_, Ok(op))) = tokens.peeking_next(|Parsed(_, r)| {
                     if let Ok(t) = r {
-                        t.is_operator() && t.matches_precedence(precedence)
+                        t.is_binary_operator() && t.matches_precedence(precedence)
                     } else {
                         false
                     }
                 }) {
                     match parse_binary_expr(precedence.next_highest(), tokens) {
-                        Some((_, Ok(right))) => expr = Expr::binary(expr, op, right),
+                        Some(Parsed(_, Ok(right))) => expr = Expr::binary(expr, op, right),
                         Some(err) => return err,
                         None => break,
                     }
                 }
-                (lc, Ok(expr))
+                Parsed(lc, Ok(expr))
             } else {
                 res
             }
@@ -302,17 +386,17 @@ fn parse_binary_expr(
 fn parse_unary_expr(
     tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>,
 ) -> Option<Parsed<Expr>> {
-    if let Some((lc, Ok(op))) = tokens
-        .peeking_next(|(_, r)| if let Ok(t) = r {
-            t.is_operator() && t.matches_precedence(Precedence::Unary)
+    if let Some(Parsed(lc, Ok(op))) = tokens
+        .peeking_next(|Parsed(_, r)| if let Ok(t) = r {
+            t.is_binary_operator() && t.matches_precedence(Precedence::Unary)
         } else {
             false
         })
-    && let Some((_, Ok(right))) = parse_unary_expr(tokens) {
-        Some((lc, Ok(Expr::unary(Some(op), right))))
+    && let Some(Parsed(_, Ok(right))) = parse_unary_expr(tokens) {
+        Some(Parsed(lc, Ok(Expr::unary(Some(op), right))))
     } else {
         match parse_primary_expr(tokens) {
-            Some((lc, Ok(expr))) => Some((lc, Ok(Expr::unary(None, expr)))),
+            Some(Parsed(lc, Ok(expr))) => Some(Parsed(lc, Ok(Expr::unary(None, expr)))),
             Some(err) => Some(err),
             None => None,
         }
@@ -322,13 +406,13 @@ fn parse_unary_expr(
 fn parse_primary_expr(
     tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>,
 ) -> Option<Parsed<Expr>> {
-    if let Some((lc, Ok(t))) = tokens.next() {
+    if let Some(Parsed(lc, Ok(t))) = tokens.peeking_next(|Parsed(_, r)| r.is_ok() && r.as_ref().expect("should short circuit first") == &Token::OneChar(';')) {
         if t.is_literal() {
-            Some((lc, Ok(Expr::Literal(t))))
+            Some(Parsed(lc, Ok(Expr::Token(t))))
         } else if t == Token::OneChar('(') {
             parse_grouping(lc, tokens)
         } else {
-            Some((lc, Err(anyhow!(AstError::UnexpectedToken(t)))))
+            Some(Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t)))))
         }
     } else {
         None
@@ -340,9 +424,9 @@ fn parse_grouping(
     tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>,
 ) -> Option<Parsed<Expr>> {
     let parsed = parse_expr(tokens);
-    if let Some((_, Ok(expr))) = parsed {
+    if let Some(Parsed(_, Ok(expr))) = parsed {
         if tokens
-            .peeking_next(|(_, r)| {
+            .peeking_next(|Parsed(_, r)| {
                 if let Ok(t) = r {
                     *t == Token::OneChar(')')
                 } else {
@@ -351,14 +435,32 @@ fn parse_grouping(
             })
             .is_none()
         {
-            Some((lc, Err(anyhow!(AstError::Closing))))
+            Some(Parsed(lc, Err(anyhow!(ParseError::ClosingParen))))
         } else {
-            Some((lc, Ok(Expr::group(expr))))
+            Some(Parsed(lc, Ok(Expr::group(expr))))
         }
     } else {
         parsed
     }
 }
+
+#[derive(Debug)]
+pub enum Statement {
+    Declaration(String, Expr),
+    Expression(Expr),
+    Print(Expr),
+}
+
+impl std::fmt::Display for Statement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expression(e) | Self::Print(e) => write!(f, "{e}"),
+            _ => todo!(),
+        }
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {

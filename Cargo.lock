@@ -123,6 +123,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hash-chain",
  "itertools",
  "once_cell",
 ]
@@ -153,6 +154,12 @@ dependencies = [
  "cc",
  "libc",
 ]
+
+[[package]]
+name = "hash-chain"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae1e9c6caefb8e1fb1be731642c99a7d5803d2282ee890f78dce35aeee988b2"
 
 [[package]]
 name = "heck"

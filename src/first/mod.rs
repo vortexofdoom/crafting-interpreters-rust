@@ -3,15 +3,43 @@ use clap::Parser;
 use itertools::{Itertools, MultiPeek};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::iter::Peekable;
 use std::path::Path;
 
 use self::ast::{parse, Precedence};
 
 mod ast;
 
-pub type Parsed<T> = ((usize, usize), Result<T>);
+//pub type Parsed<T> = ((usize, usize), Result<T>);
+
+pub struct Parsed<T>((usize, usize), Result<T>);
+
+impl<T: Display> std::fmt::Display for Parsed<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.1 {
+            Ok(t) => write!(f, "{t}"),
+            Err(e) => write!(f, "Error at ({}, {}): {e}", self.0.0, self.0.1),
+        }
+    }
+}
+
+impl<T> Parsed<T> {
+    pub fn from_parsed<U>(other: Parsed<U>) -> Self {
+        let result = if let Err(e) = other.1 {
+            Err(e)
+        } else {
+            Err(anyhow!("cannot parse Ok values directly"))
+        };
+        Self(other.0, result)
+    }
+
+    pub fn from_info(at: (usize, usize), result: Result<T>) -> Self {
+        Self(at, result)
+    }
+}
 
 #[derive(Debug, Parser)]
 pub struct LoxArgs {
@@ -110,10 +138,13 @@ impl std::fmt::Display for Token {
 }
 
 impl Token {
-    pub fn is_operator(&self) -> bool {
+    pub fn is_binary_operator(&self) -> bool {
+        use Keyword::*;
         matches!(
             self,
-            Token::OneChar('-' | '!' | '+' | '*' | '/' | '>' | '<') | Token::CharThenEqual(_)
+            Token::OneChar('-' | '!' | '+' | '*' | '/' | '>' | '<') 
+            | Token::CharThenEqual(_)
+            | Token::Keyword(Or | And)
         )
     }
 
@@ -122,15 +153,17 @@ impl Token {
         matches!(
             self,
             Token::String(_)
-                | Token::Number(_)
-                | Token::Keyword(True)
-                | Token::Keyword(False)
-                | Token::Keyword(Nil)
+            | Token::Number(_)
+            | Token::Keyword(True)
+            | Token::Keyword(False)
+            | Token::Keyword(Nil)
         )
     }
 
     pub fn highest_valid_precedence(&self) -> Precedence {
         match self {
+            Token::Keyword(Keyword::Or) => Precedence::Or,
+            Token::Keyword(Keyword::And) => Precedence::Or,
             Token::CharThenEqual('=' | '!') => Precedence::Equality,
             Token::CharThenEqual('<' | '>') | Token::OneChar('<' | '>') => Precedence::Comparison,
             Token::OneChar('+') => Precedence::Term,
@@ -152,6 +185,10 @@ pub enum ParseError {
     UnclosedString,
     ParseNumError(String),
     InvalidToken(char),
+    ClosingParen,
+    UnexpectedToken(Token),
+    MissingSemicolon,
+    StatementMissingExpr,
 }
 
 impl std::fmt::Display for ParseError {
@@ -162,6 +199,10 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::ParseNumError(s) => write!(f, "error parsing number '{s}'"),
             ParseError::InvalidToken(c) => write!(f, "invalid token '{c}'"),
+            ParseError::ClosingParen => write!(f, "missing closing ')'"),
+            ParseError::UnexpectedToken(t) => write!(f, "unexpected token {t}"),
+            ParseError::MissingSemicolon => write!(f, "missing semicolon"),
+            ParseError::StatementMissingExpr => write!(f, "statement requires an expression"),
         }
     }
 }
@@ -191,42 +232,39 @@ pub fn run_prompt() -> Result<()> {
 }
 
 fn run(source: &str) -> Result<()> {
-    let tokens = scan_tokens(source);
+    let mut tokens = scan_tokens(source);
 
-    for r in tokens.iter() {
-        match r {
-            // just printing for now
-            ((row, col), Ok(t)) => println!("{row}, {col}: {t}"),
-            ((row, col), Err(e)) => println!("{row}, {col}: {e}"),
-        }
-    }
+    // for r in tokens.iter() {
+    //     match r {
+    //         // just printing for now
+    //         ((row, col), Ok(t)) => println!("{row}, {col}: {t}"),
+    //         ((row, col), Err(e)) => println!("{row}, {col}: {e}"),
+    //     }
+    // }
 
-    let exprs = parse(&mut tokens.into_iter().multipeek());
-    if exprs.iter().all(|r| r.1.is_ok()) {
-        let vals: Vec<_> = exprs
-            .into_iter()
-            .map(|(i, e)| (i, e.and_then(|e| e.evaluate())))
-            .collect();
-        for val in vals {
-            println!("{}", val.1.unwrap());
-        }
+    let mut exprs = parse(&mut tokens);
+    if exprs.all(|Parsed(_, r)| r.is_ok()) {
+        // let vals: Vec<_> = exprs
+        //     .into_iter()
+        //     .map(|Parsed(i, e)| (i, e.and_then(|e| e.evaluate())))
+        //     .collect();
+        // for val in vals {
+        //     println!("{}", val.1.unwrap());
+        // }
     } else {
-        for ((row, col), r) in exprs {
-            match r {
-                Ok(e) => println!("{e}"),
-                Err(e) => println!("Error at line {row}, {col}: {e}"),
-            }
+        for parsed in exprs {
+            println!("{parsed}");
         }
     }
     Ok(())
 }
 
-fn scan_tokens(source: &str) -> Vec<Parsed<Token>> {
+fn scan_tokens(source: &str) -> MultiPeek<impl Iterator<Item = Parsed<Token>> + '_> {
     source
         .lines()
         .enumerate()
-        .flat_map(|(i, l)| scan_line(l).map(move |(j, r)| ((i, j), r)))
-        .collect()
+        .flat_map(|(i, l)| scan_line(l).map(move |(j, r)| Parsed((i, j), r)))
+        .multipeek()
 }
 
 fn scan_line(line: &str) -> impl Iterator<Item = (usize, Result<Token>)> {
@@ -275,7 +313,7 @@ fn scan_token(
                 }
             }
             x if x.is_ascii_digit() => Some(parse_number(i, c, chars)),
-            a if a == '_' || a.is_ascii_alphabetic() => Some(parse_identifier(i, c, chars)),
+            a if a == '_' || a.is_ascii_alphabetic() => Some(parse_word(i, c, chars)),
             w if w.is_whitespace() => scan_token(chars),
             _ => Some((i, Err(anyhow!(ParseError::InvalidToken(c))))),
         }
@@ -314,7 +352,7 @@ fn parse_number(
     }
 }
 
-fn parse_identifier(
+fn parse_word(
     start: usize,
     first: char,
     chars: &mut MultiPeek<impl Iterator<Item = (usize, char)>>,
