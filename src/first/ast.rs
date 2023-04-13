@@ -2,9 +2,9 @@ use std::{collections::HashMap, str::CharIndices};
 
 use anyhow::{anyhow, Result};
 use hash_chain::ChainMap;
-use itertools::{MultiPeek, PeekingNext, Itertools};
+use itertools::{Itertools, MultiPeek, PeekingNext};
 
-use super::{Parsed, Token, ParseError};
+use super::{ParseError, Parsed, Token};
 
 pub struct Ast<'a> {
     names: ChainMap<String, LoxVal>,
@@ -23,20 +23,17 @@ impl<'a> Ast<'a> {
         self.source.char_indices().multipeek()
     }
 
-
-fn parse_var_dec(tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>) -> Parsed<Statement> {
-    match tokens.next() {
-        Some(Parsed(lc, Ok(Token::Identifier(name)))) => todo!(),
-        _ => todo!()
+    fn parse_var_dec(
+        tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>,
+    ) -> Parsed<Statement> {
+        match tokens.next() {
+            Some(Parsed(lc, Ok(Token::Identifier(name)))) => todo!(),
+            _ => todo!(),
+        }
+        if let Some(Parsed(lc, Ok(t))) = tokens.next() {}
+        if let Some(Parsed(lc, Ok(Token::Identifier(s)))) = tokens.next() {}
+        todo!()
     }
-    if let Some(Parsed(lc, Ok(t))) = tokens.next() {
-
-    }
-    if let Some(Parsed(lc, Ok(Token::Identifier(s)))) = tokens.next() {
-
-    }
-    todo!()
-}
 }
 
 #[derive(Debug)]
@@ -120,7 +117,7 @@ impl BinaryExpr {
                 } else {
                     self.right.evaluate()
                 }
-            },
+            }
             Token::Keyword(Or) => {
                 let left = self.left.evaluate()?;
                 if left.truthy() {
@@ -128,13 +125,11 @@ impl BinaryExpr {
                 } else {
                     self.right.evaluate()
                 }
-            },
+            }
             _ => Err(anyhow!("{} is not a valid binary operator", self.operator)),
         }
     }
 }
-
-
 
 #[derive(Debug)]
 pub enum LoxVal {
@@ -290,13 +285,15 @@ impl Expr {
     }
 }
 
-pub fn parse(tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>) -> MultiPeek<impl Iterator<Item = Parsed<Statement>>> {
+pub fn parse(
+    tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>,
+) -> MultiPeek<impl Iterator<Item = Parsed<Statement>>> {
     use super::Keyword::*;
     // Maybe try to do this with a map instead of pushing to a vec
     let mut statements = vec![];
     while let Some(Parsed(lc, Ok(token))) = tokens.next() {
         statements.push(match token {
-            Token::Keyword(Var) => todo!(),//parse_var_dec(tokens),
+            Token::Keyword(Var) => todo!(), //parse_var_dec(tokens),
             Token::Keyword(Print) => todo!(),
             Token::CharThenEqual(_) => todo!(),
             Token::Identifier(_) => todo!(),
@@ -319,8 +316,6 @@ pub fn parse(tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>) -> Mul
     }
     statements.into_iter().multipeek()
 }
-
-
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum Precedence {
@@ -406,7 +401,9 @@ fn parse_unary_expr(
 fn parse_primary_expr(
     tokens: &mut MultiPeek<impl Iterator<Item = Parsed<Token>>>,
 ) -> Option<Parsed<Expr>> {
-    if let Some(Parsed(lc, Ok(t))) = tokens.peeking_next(|Parsed(_, r)| r.is_ok() && r.as_ref().expect("should short circuit first") == &Token::OneChar(';')) {
+    if let Some(Parsed(lc, Ok(t))) = tokens.peeking_next(|Parsed(_, r)| {
+        r.is_ok() && r.as_ref().expect("should short circuit first") == &Token::OneChar(';')
+    }) {
         if t.is_literal() {
             Some(Parsed(lc, Ok(Expr::Token(t))))
         } else if t == Token::OneChar('(') {
@@ -459,8 +456,6 @@ impl std::fmt::Display for Statement {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

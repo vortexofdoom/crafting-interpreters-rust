@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::iter::Peekable;
 use std::path::Path;
 
 use self::ast::{parse, Precedence};
@@ -21,7 +20,7 @@ impl<T: Display> std::fmt::Display for Parsed<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.1 {
             Ok(t) => write!(f, "{t}"),
-            Err(e) => write!(f, "Error at ({}, {}): {e}", self.0.0, self.0.1),
+            Err(e) => write!(f, "Error at ({}, {}): {e}", self.0 .0, self.0 .1),
         }
     }
 }
@@ -142,9 +141,9 @@ impl Token {
         use Keyword::*;
         matches!(
             self,
-            Token::OneChar('-' | '!' | '+' | '*' | '/' | '>' | '<') 
-            | Token::CharThenEqual(_)
-            | Token::Keyword(Or | And)
+            Token::OneChar('-' | '!' | '+' | '*' | '/' | '>' | '<')
+                | Token::CharThenEqual(_)
+                | Token::Keyword(Or | And)
         )
     }
 
@@ -153,10 +152,10 @@ impl Token {
         matches!(
             self,
             Token::String(_)
-            | Token::Number(_)
-            | Token::Keyword(True)
-            | Token::Keyword(False)
-            | Token::Keyword(Nil)
+                | Token::Number(_)
+                | Token::Keyword(True)
+                | Token::Keyword(False)
+                | Token::Keyword(Nil)
         )
     }
 
