@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use self::parser::Parser;
+
 mod parser;
 mod syntax;
 
@@ -40,6 +42,7 @@ pub fn run_prompt() -> Result<()> {
 }
 
 fn run(source: &str) -> Result<()> {
+    let mut parser = Parser::new();
     // for r in tokens.iter() {
     //     match r {
     //         // just printing for now
@@ -48,7 +51,7 @@ fn run(source: &str) -> Result<()> {
     //     }
     // }
 
-    let mut exprs = parser::parse(source);
+    let mut exprs = parser.parse(source);
     if exprs.all(|r| r.1.is_ok()) {
         // let vals: Vec<_> = exprs
         //     .into_iter()
