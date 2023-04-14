@@ -116,7 +116,7 @@ impl std::fmt::Display for Keyword {
 /// Simple wrapper type for Lox values
 /// So that we can take advantage of Rust's type system and built in behavior when possible
 /// But have the freedom to diverge and customize where necessary
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LoxVal {
     String(String),
     Number(f64),
@@ -251,6 +251,7 @@ pub enum Expr {
     Grouping(Box<Expr>),
     Binary(Box<BinaryExpr>),
     Unary(Box<UnaryExpr>),
+    Variable(String),
     Token(Token),
 }
 
@@ -260,6 +261,7 @@ impl std::fmt::Display for Expr {
             Expr::Token(t) => write!(f, "{t}"),
             Expr::Grouping(e) => write!(f, "{e}"),
             Expr::Binary(b) => write!(f, "({} {} {})", b.left, b.operator, b.right),
+            Expr::Variable(s) => write!(f, "{s}"),
             Expr::Unary(u) => {
                 if let Some(op) = &u.operator {
                     write!(f, "({}{})", op, u.right)
@@ -279,27 +281,27 @@ pub struct BinaryExpr {
 }
 
 impl BinaryExpr {
-    pub fn evaluate(self, environment: &hash_chain::ChainMap<String, LoxVal>) -> Result<LoxVal> {
+    pub fn evaluate(self, scope: &hash_chain::ChainMap<String, LoxVal>) -> Result<LoxVal> {
         use super::syntax::Keyword::*;
         match self.operator {
             // Simple Arithmetic operations
             Token::OneChar('*') => {
-                self.left.evaluate(environment)? * self.right.evaluate(environment)?
+                self.left.evaluate(scope)? * self.right.evaluate(scope)?
             }
             Token::OneChar('/') => {
-                self.left.evaluate(environment)? / self.right.evaluate(environment)?
+                self.left.evaluate(scope)? / self.right.evaluate(scope)?
             }
             Token::OneChar('+') => {
-                self.left.evaluate(environment)? + self.right.evaluate(environment)?
+                self.left.evaluate(scope)? + self.right.evaluate(scope)?
             }
             Token::OneChar('-') => {
-                self.left.evaluate(environment)? - self.right.evaluate(environment)?
+                self.left.evaluate(scope)? - self.right.evaluate(scope)?
             }
 
             // Comparison operators can only evaluate two numbers
             Token::OneChar('>') => match (
-                self.left.evaluate(environment)?,
-                self.right.evaluate(environment)?,
+                self.left.evaluate(scope)?,
+                self.right.evaluate(scope)?,
             ) {
                 (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x > y)),
                 (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
@@ -308,8 +310,8 @@ impl BinaryExpr {
                 (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
             },
             Token::OneChar('<') => match (
-                self.left.evaluate(environment)?,
-                self.right.evaluate(environment)?,
+                self.left.evaluate(scope)?,
+                self.right.evaluate(scope)?,
             ) {
                 (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x < y)),
                 (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
@@ -318,8 +320,8 @@ impl BinaryExpr {
                 (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
             },
             Token::CharThenEqual('>') => match (
-                self.left.evaluate(environment)?,
-                self.right.evaluate(environment)?,
+                self.left.evaluate(scope)?,
+                self.right.evaluate(scope)?,
             ) {
                 (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x >= y)),
                 (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
@@ -328,8 +330,8 @@ impl BinaryExpr {
                 (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
             },
             Token::CharThenEqual('<') => match (
-                self.left.evaluate(environment)?,
-                self.right.evaluate(environment)?,
+                self.left.evaluate(scope)?,
+                self.right.evaluate(scope)?,
             ) {
                 (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x <= y)),
                 (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
@@ -340,10 +342,10 @@ impl BinaryExpr {
 
             // Equality operators are more permissive
             Token::CharThenEqual('=') => Ok(LoxVal::Boolean(
-                self.left.evaluate(environment)? == self.right.evaluate(environment)?,
+                self.left.evaluate(scope)? == self.right.evaluate(scope)?,
             )),
             Token::CharThenEqual('!') => Ok(LoxVal::Boolean(
-                self.left.evaluate(environment)? != self.right.evaluate(environment)?,
+                self.left.evaluate(scope)? != self.right.evaluate(scope)?,
             )),
 
             // The Lox Logical `and` and `or` operators work on truthiness and return the operands by value, rather than a boolean
@@ -351,19 +353,19 @@ impl BinaryExpr {
             // This 'Just Works' for boolean values, but is a good thing to know if you're trying to compare other objects
             // For instance, an `and` statement with the left operand being truthy will always return the right operand whether it's truthy or not
             Token::Keyword(And) => {
-                let left = self.left.evaluate(environment)?;
+                let left = self.left.evaluate(scope)?;
                 if !left.truthy() {
                     Ok(left)
                 } else {
-                    self.right.evaluate(environment)
+                    self.right.evaluate(scope)
                 }
             }
             Token::Keyword(Or) => {
-                let left = self.left.evaluate(environment)?;
+                let left = self.left.evaluate(scope)?;
                 if left.truthy() {
                     Ok(left)
                 } else {
-                    self.right.evaluate(environment)
+                    self.right.evaluate(scope)
                 }
             }
             _ => Err(anyhow!("{} is not a valid binary operator", self.operator)),
@@ -378,16 +380,16 @@ pub struct UnaryExpr {
 }
 
 impl UnaryExpr {
-    pub fn evaluate(self, environment: &hash_chain::ChainMap<String, LoxVal>) -> Result<LoxVal> {
+    pub fn evaluate(self, scope: &hash_chain::ChainMap<String, LoxVal>) -> Result<LoxVal> {
         if let Some(t) = self.operator {
-            match (t, self.right.evaluate(environment)?) {
+            match (t, self.right.evaluate(scope)?) {
                 (Token::OneChar('!'), o) => Ok(LoxVal::Boolean(!o.truthy())), // Might want truthy() to return a LoxVal instead of a native bool
                 (Token::OneChar('-'), LoxVal::Number(n)) => Ok(LoxVal::Number(-n)),
                 (Token::OneChar('-'), o) => Err(anyhow!("cannot negate {o}")),
                 (t, _) => Err(anyhow!("{t} is not a valid unary operator")),
             }
         } else {
-            self.right.evaluate(environment)
+            self.right.evaluate(scope)
         }
     }
 }
@@ -409,16 +411,22 @@ impl Expr {
     }
 
     // All valid Lox expressions evaluate to a single value
-    pub fn evaluate(self, environment: &hash_chain::ChainMap<String, LoxVal>) -> Result<LoxVal> {
+    pub fn evaluate(self, scope: &hash_chain::ChainMap<String, LoxVal>) -> Result<LoxVal> {
         use super::syntax::Keyword::*;
         match self {
-            Expr::Grouping(e) => e.evaluate(environment),
-            Expr::Binary(b) => b.evaluate(environment),
-            Expr::Unary(u) => u.evaluate(environment),
+            Expr::Grouping(e) => e.evaluate(scope),
+            Expr::Binary(b) => b.evaluate(scope),
+            Expr::Unary(u) => u.evaluate(scope),
+            Expr::Variable(n) => {
+                if let Some(val) = scope.get(&n) {
+                    Ok(val.clone())
+                } else {
+                    Err(anyhow!("unrecognized identifier"))
+                }
+            }
             Expr::Token(o) => match o {
                 Token::String(s) => Ok(LoxVal::String(s)),
                 Token::Number(n) => Ok(LoxVal::Number(n)),
-                Token::Identifier(s) => todo!(),
                 Token::Keyword(True) => Ok(LoxVal::Boolean(true)),
                 Token::Keyword(False) => Ok(LoxVal::Boolean(false)),
                 Token::Keyword(Nil) => Ok(LoxVal::Nil),
@@ -433,7 +441,7 @@ impl Expr {
 
 #[derive(Debug)]
 pub enum Statement {
-    Declaration(String, Expr),
+    Declaration(String, Option<Expr>),
     Expression(Expr),
     Print(Expr),
 }
