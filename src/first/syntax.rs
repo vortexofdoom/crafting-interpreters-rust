@@ -437,7 +437,15 @@ pub enum Statement {
 impl std::fmt::Display for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Expression(e) | Self::Print(e) => write!(f, "{e}"),
+            Self::Expression(e)=> write!(f, "Expr: {e}"),
+            Self::Print(e) => write!(f, "Print: {e}"),
+            Self::Declaration(name, assign) => {
+                if let Some(expr) = assign {
+                    write!(f, "Var {name} = {expr}")
+                } else {
+                    write!(f, "Var {name}")
+                }
+            }
             _ => todo!(),
         }
     }
