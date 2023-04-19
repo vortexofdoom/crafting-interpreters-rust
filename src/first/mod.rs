@@ -51,8 +51,8 @@ fn run(source: &str) -> Result<()> {
     //     }
     // }
 
-    let mut parsed = parser.parse_exprs(source);
-    if parsed.all(|r| r.1.is_ok()) {
+    let parsed = parser.parse(source);
+    
         for s in parsed {
             println!("{s}");
         }
@@ -63,11 +63,5 @@ fn run(source: &str) -> Result<()> {
         // for val in vals {
         //     println!("{}", val.1.unwrap());
         // }
-    } else {
-        println!("hi");
-        for parsed in parsed {
-            println!("{parsed}");
-        }
-    }
     Ok(())
 }

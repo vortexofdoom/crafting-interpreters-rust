@@ -220,7 +220,6 @@ impl Parser {
     ) -> Option<Parsed<Statement>> {
         use super::syntax::Keyword::*;
         if let Some(Parsed(lc, res)) = tokens.peek() {
-            println!("({},{}): {res:?}", lc.0, lc.1);
             match res {
                 Ok(token) => match token {
                     Token::Keyword(Var) => return Some(self.parse_var_dec(*lc, tokens)),
@@ -243,15 +242,6 @@ impl Parser {
     ) -> impl PeekingNext<Item = Parsed<Statement>> + 'a {
         scan_tokens(source)
             .batching(|tokens| self.parse_statement(tokens))
-            .peekable()
-    }
-    /// temp
-    pub fn parse_exprs<'a>(
-        &'a mut self,
-        source: &'a str,
-    ) -> impl PeekingNext<Item = Parsed<Expr>> + 'a {
-        scan_tokens(source)
-            .batching(|tokens| self.parse_expr(tokens))
             .peekable()
     }
 
