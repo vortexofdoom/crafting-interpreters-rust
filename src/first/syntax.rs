@@ -285,60 +285,48 @@ impl BinaryExpr {
         use super::syntax::Keyword::*;
         match self.operator {
             // Simple Arithmetic operations
-            Token::OneChar('*') => {
-                self.left.evaluate(scope)? * self.right.evaluate(scope)?
-            }
-            Token::OneChar('/') => {
-                self.left.evaluate(scope)? / self.right.evaluate(scope)?
-            }
-            Token::OneChar('+') => {
-                self.left.evaluate(scope)? + self.right.evaluate(scope)?
-            }
-            Token::OneChar('-') => {
-                self.left.evaluate(scope)? - self.right.evaluate(scope)?
-            }
+            Token::OneChar('*') => self.left.evaluate(scope)? * self.right.evaluate(scope)?,
+            Token::OneChar('/') => self.left.evaluate(scope)? / self.right.evaluate(scope)?,
+            Token::OneChar('+') => self.left.evaluate(scope)? + self.right.evaluate(scope)?,
+            Token::OneChar('-') => self.left.evaluate(scope)? - self.right.evaluate(scope)?,
 
             // Comparison operators can only evaluate two numbers
-            Token::OneChar('>') => match (
-                self.left.evaluate(scope)?,
-                self.right.evaluate(scope)?,
-            ) {
-                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x > y)),
-                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
-                    Err(anyhow!("{val} is not a valid number for comparison"))
+            Token::OneChar('>') => {
+                match (self.left.evaluate(scope)?, self.right.evaluate(scope)?) {
+                    (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x > y)),
+                    (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
+                        Err(anyhow!("{val} is not a valid number for comparison"))
+                    }
+                    (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
                 }
-                (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
-            },
-            Token::OneChar('<') => match (
-                self.left.evaluate(scope)?,
-                self.right.evaluate(scope)?,
-            ) {
-                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x < y)),
-                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
-                    Err(anyhow!("{val} is not a valid number for comparison"))
+            }
+            Token::OneChar('<') => {
+                match (self.left.evaluate(scope)?, self.right.evaluate(scope)?) {
+                    (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x < y)),
+                    (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
+                        Err(anyhow!("{val} is not a valid number for comparison"))
+                    }
+                    (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
                 }
-                (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
-            },
-            Token::CharThenEqual('>') => match (
-                self.left.evaluate(scope)?,
-                self.right.evaluate(scope)?,
-            ) {
-                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x >= y)),
-                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
-                    Err(anyhow!("{val} is not a valid number for comparison"))
+            }
+            Token::CharThenEqual('>') => {
+                match (self.left.evaluate(scope)?, self.right.evaluate(scope)?) {
+                    (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x >= y)),
+                    (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
+                        Err(anyhow!("{val} is not a valid number for comparison"))
+                    }
+                    (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
                 }
-                (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
-            },
-            Token::CharThenEqual('<') => match (
-                self.left.evaluate(scope)?,
-                self.right.evaluate(scope)?,
-            ) {
-                (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x <= y)),
-                (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
-                    Err(anyhow!("{val} is not a valid number for comparison"))
+            }
+            Token::CharThenEqual('<') => {
+                match (self.left.evaluate(scope)?, self.right.evaluate(scope)?) {
+                    (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Boolean(x <= y)),
+                    (LoxVal::Number(_), val) | (val, LoxVal::Number(_)) => {
+                        Err(anyhow!("{val} is not a valid number for comparison"))
+                    }
+                    (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
                 }
-                (val1, val2) => Err(anyhow!("cannot compare {val1} with {val2}")),
-            },
+            }
 
             // Equality operators are more permissive
             Token::CharThenEqual('=') => Ok(LoxVal::Boolean(

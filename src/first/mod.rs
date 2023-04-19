@@ -51,8 +51,11 @@ fn run(source: &str) -> Result<()> {
     //     }
     // }
 
-    let mut exprs = parser.parse(source);
-    if exprs.all(|r| r.1.is_ok()) {
+    let mut parsed = parser.parse_exprs(source);
+    if parsed.all(|r| r.1.is_ok()) {
+        for s in parsed {
+            println!("{s}");
+        }
         // let vals: Vec<_> = exprs
         //     .into_iter()
         //     .map(|Parsed(i, e)| (i, e.and_then(|e| e.evaluate())))
@@ -61,7 +64,8 @@ fn run(source: &str) -> Result<()> {
         //     println!("{}", val.1.unwrap());
         // }
     } else {
-        for parsed in exprs {
+        println!("hi");
+        for parsed in parsed {
             println!("{parsed}");
         }
     }

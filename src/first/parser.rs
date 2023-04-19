@@ -37,7 +37,7 @@ pub enum ParseError {
     UnexpectedToken(Token),
     MissingSemicolon,
     StatementMissingExpr,
-    Expected(ExpectedToken, Option<Token>)
+    Expected(ExpectedToken, Option<Token>),
 }
 
 #[derive(Debug)]
@@ -73,10 +73,12 @@ impl std::fmt::Display for ParseError {
             ParseError::UnexpectedToken(t) => write!(f, "unexpected token {t}"),
             ParseError::MissingSemicolon => write!(f, "missing semicolon"),
             ParseError::StatementMissingExpr => write!(f, "statement requires an expression"),
-            ParseError::Expected(exp, found) => if let Some(token) = found {
-                write!(f, "expected {exp}, found {token}")
-            } else {
-                write!(f, "expected {exp}, but reached eof")
+            ParseError::Expected(exp, found) => {
+                if let Some(token) = found {
+                    write!(f, "expected {exp}, found {token}")
+                } else {
+                    write!(f, "expected {exp}, but reached eof")
+                }
             }
         }
     }
@@ -119,105 +121,120 @@ impl Parser {
         }
     }
 
+    // TODO: Fix this monstrosity
     fn parse_var_dec(
         &mut self,
-        tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
-    ) -> Result<Statement> {
-        if let Some(Parsed(_, next)) = tokens.next() {
-            if let Some(Parsed(_, token)) = tokens.next() {
-                if let Token::Identifier(name) = next?
-                && let Some(Parsed(_, res)) = self.parse_expr(tokens)
-                && token.as_ref().is_ok_and(|t| *t == Token::OneChar('=') || *t == Token::OneChar(';')) {
-                    if token.is_ok_and(|t| t == Token::OneChar('=')) {
-                        Ok(Statement::Declaration(name, Some(res?)))
-                    } else {
-                        Ok(Statement::Declaration(name, None))
-                    }
-                } else {
-                    Err(anyhow!(ParseError::UnexpectedToken(token?)))
+        start: (usize, usize),
+        tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+    ) -> Parsed<Statement> {
+        // advancing past "var"
+        tokens.next();
+        // short circuiting directly to primary since the only valid token is an identifier
+        if let Some(Parsed(lc, Ok(Expr::Variable(name)))) = self.parse_primary_expr(tokens) {
+            match tokens.next() {
+                Some(Parsed(_, Ok(Token::OneChar(';')))) => {
+                    Parsed(start, Ok(Statement::Declaration(name, None)))
                 }
-            } else {
-                Err(anyhow!(ParseError::Expected(ExpectedToken::Semicolon, None)))
+                Some(Parsed(_, Ok(Token::OneChar('=')))) => {
+                    if let Some(Parsed(_, Ok(expr))) = self.parse_expr(tokens) {
+                        if let Some(Parsed(lc, res)) = tokens.next() {
+                            match res {
+                                Ok(Token::OneChar(';')) => {
+                                    Parsed(start, Ok(Statement::Declaration(name, Some(expr))))
+                                }
+                                Ok(token) => {
+                                    Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(token))))
+                                }
+                                Err(err) => Parsed(lc, Err(err)),
+                            }
+                        } else {
+                            Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))
+                        }
+                    } else {
+                        Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))
+                    }
+                }
+                Some(Parsed(lc, Ok(token))) => {
+                    Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(token))))
+                }
+                Some(Parsed(lc, Err(err))) => Parsed(lc, Err(err)),
+                None => Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon))),
             }
         } else {
-            Err(anyhow!(ParseError::Expected(ExpectedToken::Identifier, None)))
+            Parsed(start, Err(anyhow!("expected identifier")))
         }
-
-        // && let Some(Parsed(_, expr)) = self.parse_expr(tokens) {
-        //     if token.as_ref().is_ok_and(|t| *t == Token::OneChar('=')) {
-        //         Ok(Statement::Declaration(name, expr?))
-        //     } else {
-        //         Err(anyhow!(ParseError::UnexpectedToken(token?)))
-        //     }
-        // } else {
-        //     Err(anyhow!(ParseError::StatementMissingExpr))
-        // }
     }
 
-    fn check_semicolon(&mut self, statement: Statement, tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Result<Statement> {
+    fn check_semicolon(
+        &mut self,
+        statement: Statement,
+        tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+    ) -> Result<Statement> {
         if tokens
-                .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
-                .is_some()
-            {
-                Ok(statement)
-            } else {
-                Err(anyhow!(ParseError::MissingSemicolon))
-            }
+            .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
+            .is_some()
+        {
+            Ok(statement)
+        } else {
+            Err(anyhow!(ParseError::MissingSemicolon))
+        }
     }
 
     fn parse_print_stmt(
         &mut self,
-        tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
-    ) -> Result<Statement> {
-        if let Some(Parsed(_, res)) = self.parse_expr(tokens) {
-            self.check_semicolon(Statement::Print(res?), tokens)
+        start: (usize, usize),
+        tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+    ) -> Parsed<Statement> {
+        // advance past "print"
+        tokens.next();
+        if let Some(Parsed(lc, res)) = self.parse_expr(tokens) {
+            match res {
+                Ok(expr) => Parsed(start, self.check_semicolon(Statement::Print(expr), tokens)),
+                Err(err) => Parsed(lc, Err(err)),
+            }
         } else {
-            Err(anyhow!(ParseError::StatementMissingExpr))
+            Parsed(start, Err(anyhow!(ParseError::StatementMissingExpr)))
         }
     }
 
     fn parse_expr_statement(
         &mut self,
-        tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
-    ) -> Result<Statement> {
-        if let Some(Parsed(_, res)) = self.parse_expr(tokens) {
-            self.check_semicolon(Statement::Expression(res?), tokens)
-        } else {
-            Err(anyhow!(ParseError::StatementMissingExpr))
+        tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+    ) -> Parsed<Statement> {
+        let Parsed(lc, res) = self
+            .parse_expr(tokens)
+            .expect("we're only calling this when we've already peeked a token");
+
+        match res {
+            Ok(expr) => Parsed(
+                lc,
+                self.check_semicolon(Statement::Expression(expr), tokens),
+            ),
+            Err(err) => Parsed(lc, Err(err)),
         }
     }
 
     fn parse_statement(
         &mut self,
-        tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+        tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
     ) -> Option<Parsed<Statement>> {
         use super::syntax::Keyword::*;
-        tokens.next().map(|Parsed(lc, res)| {
-            Parsed(
-                lc,
-                res.and_then(|token| match token {
-                    Token::Keyword(Var) => self.parse_var_dec(tokens),
-                    Token::Keyword(Print) => self.parse_print_stmt(tokens),
-                    Token::CharThenEqual(_) => todo!(),
-                    Token::Identifier(_) => todo!(),
-                    Token::String(_) => todo!(),
-                    Token::Number(_) => todo!(),
-                    _ => self.parse_expr_statement(tokens),
-                }),
-            )
-        })
-        // match (parse_expr(tokens), tokens.next()) {
-        //     (Some(Parsed(_, Ok(expr))), Some(Parsed(_, Ok(Token::OneChar(';'))))) => if token == Token::Keyword(Print) {
-        //         statements.push(Parsed(lc, Ok(Statement::Print(expr))))
-        //     } else {
-        //         statements.push(Parsed(lc, Ok(Statement::Expression(expr))))
-        //     },
-        //     (Some(Parsed(lc, Ok(expr))), None) => statements.push(Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))),
-        //     (Some(Parsed(_, Ok(_))), Some(Parsed(lc, Ok(t)))) => statements.push(Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t))))),
-        //     (Some(Parsed(_, Ok(_))), Some(err)) => statements.push(Parsed::from_parsed(err)),
-        //     (Some(err), _) => statements.push(Parsed::from_parsed(err)),
-        //     (None, None) => statements.push(Parsed(lc, Err(anyhow!(ParseError::StatementMissingExpr)))),
-        // }
+        if let Some(Parsed(lc, res)) = tokens.peek() {
+            println!("({},{}): {res:?}", lc.0, lc.1);
+            match res {
+                Ok(token) => match token {
+                    Token::Keyword(Var) => return Some(self.parse_var_dec(*lc, tokens)),
+                    Token::Keyword(Print) => return Some(self.parse_print_stmt(*lc, tokens)),
+                    _ => return Some(self.parse_expr_statement(tokens)),
+                },
+                _ => {
+                    let Parsed(lc, res) = tokens.next().unwrap();
+                    Some(Parsed(lc, Err(res.unwrap_err())))
+                }
+            }
+        } else {
+            None
+        }
     }
 
     pub fn parse<'a>(
@@ -228,10 +245,19 @@ impl Parser {
             .batching(|tokens| self.parse_statement(tokens))
             .peekable()
     }
+    /// temp
+    pub fn parse_exprs<'a>(
+        &'a mut self,
+        source: &'a str,
+    ) -> impl PeekingNext<Item = Parsed<Expr>> + 'a {
+        scan_tokens(source)
+            .batching(|tokens| self.parse_expr(tokens))
+            .peekable()
+    }
 
     fn parse_expr(
         &mut self,
-        tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+        tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
     ) -> Option<Parsed<Expr>> {
         self.parse_binary_expr(Precedence::Or, tokens)
     }
@@ -286,17 +312,13 @@ impl Parser {
         tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
     ) -> Option<Parsed<Expr>> {
         tokens
-            .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
-            .and_then(|Parsed(lc, r)| {
-                match r {
-                    Ok(Token::OneChar('(')) => self.parse_grouping(lc, tokens),
-                    Ok(Token::Identifier(name)) => {
-                        Some(Parsed(lc, Ok(Expr::Token(Token::Identifier(name)))))
-                    }
-                    Ok(t) if t.is_literal() => Some(Parsed(lc, Ok(Expr::Token(t)))),
-                    Ok(t) => Some(Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t))))),
-                    Err(e) => Some(Parsed(lc, Err(e))),
-                }
+            .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t != Token::OneChar(';')))
+            .and_then(|Parsed(lc, r)| match r {
+                Ok(Token::OneChar('(')) => self.parse_grouping(lc, tokens),
+                Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
+                Ok(t) if t.is_literal() => Some(Parsed(lc, Ok(Expr::Token(t)))),
+                Ok(t) => Some(Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t))))),
+                Err(e) => Some(Parsed(lc, Err(e))),
             })
     }
 
@@ -326,7 +348,7 @@ impl Parser {
     }
 }
 
-fn scan_tokens(source: &str) -> impl PeekingNext<Item = Parsed<Token>> + '_ {
+fn scan_tokens(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>> + '_> {
     source
         .lines()
         .enumerate()
