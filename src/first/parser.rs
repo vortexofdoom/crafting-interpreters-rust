@@ -1,32 +1,9 @@
 use super::syntax::{Expr, Keyword, LoxVal, Precedence, Statement, Token};
 use anyhow::{anyhow, Result};
-use once_cell::sync::Lazy;
 
 use hash_chain::ChainMap;
 use itertools::{Itertools, PeekingNext};
 use std::{collections::HashMap, iter::Peekable, str::CharIndices};
-
-static KEYWORDS: Lazy<HashMap<&'static str, Keyword>> = Lazy::new(|| {
-    use Keyword::*;
-    let mut keywords = HashMap::new();
-    keywords.insert("and", And);
-    keywords.insert("class", Class);
-    keywords.insert("else", Else);
-    keywords.insert("false", False);
-    keywords.insert("for", For);
-    keywords.insert("fun", Fun);
-    keywords.insert("if", If);
-    keywords.insert("nil", Nil);
-    keywords.insert("or", Or);
-    keywords.insert("print", Print);
-    keywords.insert("return", Return);
-    keywords.insert("super", Super);
-    keywords.insert("this", This);
-    keywords.insert("true", True);
-    keywords.insert("var", Var);
-    keywords.insert("while", While);
-    keywords
-});
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -37,6 +14,7 @@ pub enum ParseError {
     UnexpectedToken(Token),
     MissingSemicolon,
     StatementMissingExpr,
+    UndefinedVariable(String),
     Expected(ExpectedToken, Option<Token>),
 }
 
@@ -73,6 +51,7 @@ impl std::fmt::Display for ParseError {
             ParseError::UnexpectedToken(t) => write!(f, "unexpected token {t}"),
             ParseError::MissingSemicolon => write!(f, "missing semicolon"),
             ParseError::StatementMissingExpr => write!(f, "statement requires an expression"),
+            ParseError::UndefinedVariable(s) => write!(f, "undefined variable {s}"),
             ParseError::Expected(exp, found) => {
                 if let Some(token) = found {
                     write!(f, "expected {exp}, found {token}")
@@ -92,21 +71,6 @@ impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
             Ok(t) => write!(f, "{t}"),
             Err(e) => write!(f, "Error at ({}, {}): {e}", self.0 .0, self.0 .1),
         }
-    }
-}
-
-impl<T> Parsed<T> {
-    pub fn from_parsed<U>(other: Parsed<U>) -> Self {
-        let result = if let Err(e) = other.1 {
-            Err(e)
-        } else {
-            Err(anyhow!("cannot parse Ok values directly"))
-        };
-        Self(other.0, result)
-    }
-
-    pub fn from_info(at: (usize, usize), result: Result<T>) -> Self {
-        Self(at, result)
     }
 }
 
@@ -136,20 +100,14 @@ impl Parser {
                     Parsed(start, Ok(Statement::Declaration(name, None)))
                 }
                 Some(Parsed(_, Ok(Token::OneChar('=')))) => {
-                    if let Some(Parsed(_, Ok(expr))) = self.parse_expr(tokens) {
-                        if let Some(Parsed(lc, res)) = tokens.next() {
-                            match res {
-                                Ok(Token::OneChar(';')) => {
-                                    Parsed(start, Ok(Statement::Declaration(name, Some(expr))))
-                                }
-                                Ok(token) => {
-                                    Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(token))))
-                                }
-                                Err(err) => Parsed(lc, Err(err)),
-                            }
-                        } else {
-                            Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))
-                        }
+                    if let Some(Parsed(_, Ok(expr))) = self.parse_expr(tokens)
+                    && let Some(Parsed(lc, res)) = tokens.next() {
+                        res.map_or_else(
+                            |err| Parsed(lc, Err(err)),
+                            |t| match t {
+                                Token::OneChar(';') => Parsed(start, Ok(Statement::Declaration(name, Some(expr)))),
+                                _ => Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t)))),
+                            })
                     } else {
                         Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))
                     }
@@ -161,7 +119,7 @@ impl Parser {
                 None => Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon))),
             }
         } else {
-            Parsed(start, Err(anyhow!("expected identifier")))
+            Parsed(start, Err(anyhow!(ParseError::Expected(ExpectedToken::Identifier, None))))
         }
     }
 
@@ -219,12 +177,14 @@ impl Parser {
         tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
     ) -> Option<Parsed<Statement>> {
         use super::syntax::Keyword::*;
+        // Peeking because in the case of expression statements we don't want to consume a token
+        // peeking_next().and_then() might be able to get rid of the else, but we'll wait on that until it's more complete
         if let Some(Parsed(lc, res)) = tokens.peek() {
             match res {
                 Ok(token) => match token {
-                    Token::Keyword(Var) => return Some(self.parse_var_dec(*lc, tokens)),
-                    Token::Keyword(Print) => return Some(self.parse_print_stmt(*lc, tokens)),
-                    _ => return Some(self.parse_expr_statement(tokens)),
+                    Token::Keyword(Var) => Some(self.parse_var_dec(*lc, tokens)),
+                    Token::Keyword(Print) => Some(self.parse_print_stmt(*lc, tokens)),
+                    _ => Some(self.parse_expr_statement(tokens)),
                 },
                 _ => {
                     let Parsed(lc, res) = tokens.next().unwrap();
@@ -301,13 +261,19 @@ impl Parser {
         &mut self,
         tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
     ) -> Option<Parsed<Expr>> {
+        use itertools::Either::*;
         tokens
             .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t != Token::OneChar(';')))
             .and_then(|Parsed(lc, r)| match r {
                 Ok(Token::OneChar('(')) => self.parse_grouping(lc, tokens),
                 Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
-                Ok(t) if t.is_literal() => Some(Parsed(lc, Ok(Expr::Token(t)))),
-                Ok(t) => Some(Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t))))),
+                Ok(t) => Some(Parsed(
+                    lc,
+                    match t.try_convert_literal() {
+                        Left(val) => Ok(Expr::Literal(val)),
+                        Right(token) => Err(anyhow!(ParseError::UnexpectedToken(token))),
+                    },
+                )),
                 Err(e) => Some(Parsed(lc, Err(e))),
             })
     }
@@ -345,7 +311,7 @@ fn scan_tokens(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>> + '
         .flat_map(|(i, line)| {
             line.char_indices()
                 .peekable()
-                .batching(|chars| scan_token(chars))
+                .batching(scan_token)
                 .map(move |(j, r)| Parsed((i + 1, j + 1), r))
         })
         .peekable()
@@ -410,7 +376,7 @@ fn parse_number(
         // but that can be handled by the int parsing, since it can't represent any other valid Lox syntax
         // if the last char is '.' we take everything up to but excluding it, as it is either a function call or an error
         if c == '.' {
-            i = i - 1;
+            i -= 1;
         }
         std::iter::once(first)
             .chain(chars.take(i).map(|(_, c)| c))
@@ -439,7 +405,7 @@ fn parse_word(first: char, chars: &mut Peekable<CharIndices>) -> Token {
         )
         .collect();
 
-    if let Some(&k) = KEYWORDS.get(string.as_str()) {
+    if let Some(k) = Keyword::try_from_str(&string) {
         Token::Keyword(k)
     } else {
         Token::Identifier(string)

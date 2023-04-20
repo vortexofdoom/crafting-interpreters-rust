@@ -7,6 +7,7 @@ use std::path::Path;
 
 use self::parser::Parser;
 
+mod interpreter;
 mod parser;
 mod syntax;
 
@@ -52,16 +53,16 @@ fn run(source: &str) -> Result<()> {
     // }
 
     let parsed = parser.parse(source);
-    
-        for s in parsed {
-            println!("{s}");
-        }
-        // let vals: Vec<_> = exprs
-        //     .into_iter()
-        //     .map(|Parsed(i, e)| (i, e.and_then(|e| e.evaluate())))
-        //     .collect();
-        // for val in vals {
-        //     println!("{}", val.1.unwrap());
-        // }
+
+    for s in parsed {
+        println!("{s}");
+    }
+    // let vals: Vec<_> = exprs
+    //     .into_iter()
+    //     .map(|Parsed(i, e)| (i, e.and_then(|e| e.evaluate())))
+    //     .collect();
+    // for val in vals {
+    //     println!("{}", val.1.unwrap());
+    // }
     Ok(())
 }

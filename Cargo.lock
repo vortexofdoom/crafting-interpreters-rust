@@ -125,7 +125,6 @@ dependencies = [
  "clap",
  "hash-chain",
  "itertools",
- "once_cell",
 ]
 
 [[package]]
