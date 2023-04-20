@@ -1,9 +1,7 @@
 use anyhow::{anyhow, Result};
 use itertools::Either;
 
-use crate::first::parser::ParseError;
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     OneChar(char),
     CharThenEqual(char),
@@ -307,20 +305,53 @@ impl std::fmt::Display for Expr {
 
 impl Expr {
     // Constructors to avoid Box::new() for every constructed expression
+    pub fn assignment(lvalue: Expr, rvalue: Expr) -> Self {
+        Self::Assignment(Box::new(lvalue), Box::new(rvalue))
+    }
+
     pub fn binary(left: Expr, operator: Token, right: Expr) -> Self {
         Self::Binary(Box::new(left), operator, Box::new(right))
     }
+
     pub fn unary(operator: Option<Token>, right: Expr) -> Self {
         Self::Unary(operator, Box::new(right))
     }
+
     pub fn group(self) -> Self {
         Self::Grouping(Box::new(self))
+    }
+
+    pub fn is_lvalue(&self) -> bool {
+        match self {
+            Expr::Unary(None, var) => matches!(**var, Expr::Variable(_)),
+            Expr::Variable(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Declaration {
+    Variable(String, Option<Expr>),
+}
+
+impl std::fmt::Display for Declaration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Variable(name, assign) => {
+                if let Some(expr) = assign {
+                    write!(f, "var {name} = {expr}")
+                } else {
+                    write!(f, "var {name}")
+                }
+            }
+        }
     }
 }
 
 #[derive(Debug)]
 pub enum Statement {
-    Declaration(String, Option<Expr>),
+    Declaration(Declaration),
     Expression(Expr),
     Print(Expr),
 }
@@ -328,15 +359,9 @@ pub enum Statement {
 impl std::fmt::Display for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Declaration(d) => write!(f, "{d}"),
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
-            Self::Declaration(name, assign) => {
-                if let Some(expr) = assign {
-                    write!(f, "Var {name} = {expr}")
-                } else {
-                    write!(f, "Var {name}")
-                }
-            }
             _ => todo!(),
         }
     }
