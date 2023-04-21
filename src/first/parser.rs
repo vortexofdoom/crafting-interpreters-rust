@@ -73,12 +73,6 @@ impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
     }
 }
 
-impl<T> Parsed<T> {
-    pub fn get(&self) -> Option<&T> {
-        self.1.as_ref().ok()
-    }
-}
-
 // TODO: Fix this monstrosity
 fn parse_var_dec(
     start: (usize, usize),
@@ -181,6 +175,37 @@ fn parse_expr_statement(
     }
 }
 
+fn parse_block(
+    lc: (usize, usize),
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Parsed<Statement> {
+    // consume the '{'
+    tokens.next();
+
+    let mut vec = vec![];
+    // loop to consume the whole block whether or not there is a parse error, for sync purposes
+    while let Some(Parsed(_, Ok(token))) = tokens.peek()
+    && *token != Token::OneChar('}') {
+        vec.push(parse_statement(tokens).unwrap_or(Parsed(lc, Err(anyhow!(ParseError::Expected(ExpectedToken::ClosingParen, None))))))
+    }
+
+    match tokens.peeking_next(|Parsed(_, res)| {
+        (res.as_ref().is_ok_and(|t| *t == Token::OneChar('}'))) || res.is_err()
+    }) {
+        Some(Parsed(_, Ok(_))) => {
+            if vec.iter().any(|parsed| parsed.1.is_err()) {
+                // we return only the error but consume the whole block
+                vec.into_iter().find(|parsed| parsed.1.is_err()).unwrap()
+            } else {
+                let vec = vec.into_iter().map(|Parsed(_, res)| res.unwrap()).collect();
+                Parsed(lc, Ok(Statement::Block(vec)))
+            }
+        }
+        Some(Parsed(lc, Err(err))) => Parsed(lc, Err(err)),
+        None => Parsed(lc, Err(anyhow!(ParseError::ClosingParen))),
+    }
+}
+
 fn parse_statement(
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Option<Parsed<Statement>> {
@@ -192,6 +217,7 @@ fn parse_statement(
             Ok(token) => match token {
                 Token::Keyword(Var) => Some(parse_var_dec(*lc, tokens)),
                 Token::Keyword(Print) => Some(parse_print_stmt(*lc, tokens)),
+                Token::OneChar('{') => Some(parse_block(*lc, tokens)),
                 _ => Some(parse_expr_statement(tokens)),
             },
             _ => {
@@ -262,9 +288,9 @@ fn parse_unary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Opti
     if let Some(Parsed(lc, Ok(op))) = tokens
             .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| t.is_unary_operator() && t.matches_precedence(Precedence::Unary)))
         && let Some(Parsed(_, Ok(right))) = parse_unary_expr(tokens) {
-            Some(Parsed(lc, Ok(Expr::unary(Some(op), right))))
+            Some(Parsed(lc, Ok(Expr::unary(op, right))))
         } else {
-            parse_primary_expr(tokens).map(|Parsed(lc, res)| Parsed(lc, res.map(|expr| Expr::unary(None, expr))))
+            parse_primary_expr(tokens)
         }
 }
 

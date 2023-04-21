@@ -169,8 +169,9 @@ impl std::fmt::Display for LoxVal {
         match self {
             LoxVal::String(s) => write!(f, "{s}"),
             LoxVal::Number(n) => write!(f, "{n}"),
-            LoxVal::Boolean(_) => todo!(),
-            LoxVal::Nil => todo!(),
+            LoxVal::Boolean(true) => write!(f, "True"),
+            LoxVal::Boolean(false) => write!(f, "False"),
+            LoxVal::Nil => write!(f, "nil"),
         }
     }
 }
@@ -278,7 +279,7 @@ impl Precedence {
 pub enum Expr {
     Grouping(Box<Expr>),
     Binary(Box<Expr>, Token, Box<Expr>),
-    Unary(Option<Token>, Box<Expr>),
+    Unary(Token, Box<Expr>),
     Assignment(Box<Expr>, Box<Expr>),
     Variable(String),
     Literal(LoxVal),
@@ -292,13 +293,7 @@ impl std::fmt::Display for Expr {
             Expr::Binary(l, op, r) => write!(f, "({l} {op} {r})"),
             Expr::Variable(s) => write!(f, "{s}"),
             Expr::Assignment(l, r) => write!(f, "{l} = {r}"),
-            Expr::Unary(op, r) => {
-                if let Some(op) = op {
-                    write!(f, "({op}{r})")
-                } else {
-                    write!(f, "{r}",)
-                }
-            }
+            Expr::Unary(op, r) => write!(f, "({op}{r})"),
         }
     }
 }
@@ -313,7 +308,7 @@ impl Expr {
         Self::Binary(Box::new(left), operator, Box::new(right))
     }
 
-    pub fn unary(operator: Option<Token>, right: Expr) -> Self {
+    pub fn unary(operator: Token, right: Expr) -> Self {
         Self::Unary(operator, Box::new(right))
     }
 
@@ -322,11 +317,7 @@ impl Expr {
     }
 
     pub fn is_lvalue(&self) -> bool {
-        match self {
-            Expr::Unary(None, var) => matches!(**var, Expr::Variable(_)),
-            Expr::Variable(_) => true,
-            _ => false,
-        }
+        matches!(self, Expr::Variable(_))
     }
 }
 
@@ -354,6 +345,7 @@ pub enum Statement {
     Declaration(Declaration),
     Expression(Expr),
     Print(Expr),
+    Block(Vec<Statement>),
 }
 
 impl std::fmt::Display for Statement {
