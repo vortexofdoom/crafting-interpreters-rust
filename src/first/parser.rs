@@ -94,7 +94,6 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
                             |err| Parsed(lc, Err(err)),
                             |t| match t {
                                 Token::OneChar(';') => Parsed(start, Ok(Statement::Declaration(Declaration::Variable(name, Some(expr))))),
-
                                 _ => Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(t)))),
                             })
                     } else {
@@ -395,17 +394,7 @@ fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Opt
             Some(Parsed(_, Ok(Token::OneChar('=')))) => {
                 Some(Parsed(lc, parse_assignment(e, tokens)))
             }
-            Some(Parsed(_, Ok(Token::OneChar(';') | Token::OneChar('{')))) => {
-                Some(Parsed(lc, Ok(e)))
-            }
-            Some(Parsed(tlc, Ok(t))) => Some(Parsed(
-                *tlc,
-                Err(anyhow!(ParseError::UnexpectedToken(t.clone()))),
-            )),
-            Some(Parsed(tlc, Err(_))) => {
-                Some(Parsed(*tlc, Err(anyhow!(ParseError::MissingSemicolon))))
-            }
-            None => Some(Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon)))),
+            _ => Some(Parsed(lc, Ok(e))),
         },
         Parsed(lc, Err(err)) => Some(Parsed(lc, Err(err))),
     }
