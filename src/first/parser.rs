@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use itertools::{Itertools, PeekingNext};
 use std::{iter::Peekable, str::CharIndices};
 
+
 #[derive(Debug, Clone)]
 pub enum ParseError {
     UnclosedString,
@@ -70,11 +71,284 @@ impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
 }
 
 /// This should only get called if we have already peeked, know to advance, and do not need the token
-fn get_line_column(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> (usize, usize) {
+fn get_line_column<T>(tokens: &mut Peekable<impl Iterator<Item = Parsed<T>>>) -> (usize, usize) {
     tokens
         .next()
         .expect("should only be called when a token is known to exist")
         .0
+}
+
+pub fn parse(source: &str) -> impl PeekingNext<Item = Parsed<Statement>> + '_ {
+    scan_tokens(source).batching(parse_statement).peekable()
+}
+
+/*****************************************************
+    Tokenizer
+ *****************************************************/
+ pub fn scan_tokens(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>> + '_> {
+    source
+        .lines()
+        .enumerate()
+        .flat_map(|(i, line)| {
+            line.char_indices()
+                .peekable()
+                .batching(scan_token)
+                .map(move |(j, r)| Parsed((i + 1, j + 1), r))
+        })
+        .peekable()
+}
+
+fn scan_token(chars: &mut Peekable<CharIndices>) -> Option<(usize, Result<Token>)> {
+    chars.next().and_then(|(i, c)| match c {
+        '"' => {
+            let string = chars
+                .peeking_take_while(|&(_, c)| c != '"')
+                .map(|(_, c)| c)
+                .collect();
+            if let Some((_, '"')) = chars.next() {
+                Some((i, Ok(Token::String(string))))
+            } else {
+                // if the next char is not '"' as we specified it means we've reached the end of the line
+                Some((i, Err(anyhow!(ParseError::UnclosedString))))
+            }
+        }
+        // Code specific to handling comments
+        '/' => chars.peek().and_then(|ci| {
+            if ci.1 == '/' {
+                // another slash means we have a comment and can ignore the rest of the line after this point
+                None
+            } else {
+                Some((i, Ok(Token::OneChar('/'))))
+            }
+        }),
+        // One or two character tokens
+        '!' | '=' | '<' | '>' => Some((
+            i,
+            Ok(if chars.peeking_next(|ci| ci.1 == '=').is_some() {
+                Token::CharThenEqual(c)
+            } else {
+                Token::OneChar(c)
+            }),
+        )),
+
+        // Invariably single char tokens
+        '(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*' => {
+            Some((i, Ok(Token::OneChar(c))))
+        }
+        x if x.is_ascii_digit() => Some(parse_number(i, c, chars)),
+        a if a == '_' || a.is_ascii_alphabetic() => Some((i, Ok(parse_word(c, chars)))),
+        w if w.is_whitespace() => scan_token(chars),
+        _ => Some((i, Err(anyhow!(ParseError::InvalidToken(c))))),
+    })
+}
+
+fn parse_number(
+    start: usize,
+    first: char,
+    chars: &mut Peekable<CharIndices>,
+) -> (usize, Result<Token>) {
+    let mut chars_cl = chars.clone();
+    let number = chars_cl
+        .peeking_take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+        .map(|(i, c)| (i - start, c));
+    let string: String = if let Some((mut i, c)) = number.last() {
+        // This only makes sure we are not including a trailing '.' with no digits following
+        // This could technically return an arbitrary chaining of digits and '.'
+        // but that can be handled by the int parsing, since it can't represent any other valid Lox syntax
+        // if the last char is '.' we take everything up to but excluding it, as it is either a function call or an error
+        if c == '.' {
+            i -= 1;
+        }
+        std::iter::once(first)
+            .chain(chars.take(i).map(|(_, c)| c))
+            .collect()
+    } else {
+        // Otherwise all we have is a single digit
+        String::from(first)
+    };
+
+    if let Ok(n) = string.parse::<f64>() {
+        (start, Ok(Token::Number(n)))
+    } else {
+        (start, Err(anyhow!(ParseError::ParseNumError(string))))
+    }
+}
+
+/// Parses a string of characters that can begin with a letter or '_', and determines whether it is an keyword or an identifier
+/// Returns a `Token` as this will always be valid, since we start with one valid character (which is a valid identifier alone) and stop at the first invalid character
+/// validating the identifier itself comes in the next pass.
+fn parse_word(first: char, chars: &mut Peekable<CharIndices>) -> Token {
+    let string: String = std::iter::once(first)
+        .chain(
+            chars
+                .peeking_take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+                .map(|(_, c)| c),
+        )
+        .collect();
+
+    if let Some(k) = Keyword::get_from_str(&string) {
+        Token::Keyword(k)
+    } else {
+        Token::Identifier(string)
+    }
+}
+
+/*****************************************************
+    Expression Parsing
+ *****************************************************/
+
+fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Option<Parsed<Expr>> {
+    let expr = parse_binary_expr(Precedence::Or, tokens)?;
+    match expr {
+        Parsed(lc, Ok(e)) => match tokens.peek() {
+            Some(Parsed(_, Ok(Token::OneChar('=')))) => {
+                Some(Parsed(lc, parse_assignment(e, tokens)))
+            }
+            _ => Some(Parsed(lc, Ok(e))),
+        },
+        Parsed(lc, Err(err)) => Some(Parsed(lc, Err(err))),
+    }
+}
+
+fn parse_assignment(
+    lvalue: Expr,
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Result<Expr> {
+    tokens.next();
+    if lvalue.is_lvalue() {
+        match parse_binary_expr(Precedence::Or, tokens) {
+            Some(Parsed(_, Ok(rvalue))) => Ok(Expr::assignment(lvalue, rvalue)),
+            Some(Parsed(_, Err(err))) => Err(err),
+            None => Err(anyhow!(ParseError::StatementMissingExpr)),
+        }
+    } else {
+        Err(anyhow!("{lvalue}"))
+    }
+}
+
+fn parse_binary_expr(
+    precedence: Precedence,
+    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+) -> Option<Parsed<Expr>> {
+    if precedence < Precedence::Unary {
+        parse_binary_expr(precedence.next_highest(), tokens).map(|res| {
+            if let Parsed(lc, Ok(mut expr)) = res {
+                while let Some(Parsed(_, Ok(op))) = tokens.peeking_next(|Parsed(_, r)| {
+                    r.as_ref()
+                        .is_ok_and(|t| t.is_binary_operator() && t.matches_precedence(precedence))
+                }) {
+                    match parse_binary_expr(precedence.next_highest(), tokens) {
+                        Some(Parsed(_, Ok(right))) => expr = Expr::binary(expr, op, right),
+                        Some(err) => return err,
+                        None => break,
+                    }
+                }
+                Parsed(lc, Ok(expr))
+            } else {
+                res
+            }
+        })
+    } else {
+        parse_unary_expr(tokens)
+    }
+}
+
+fn parse_unary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Option<Parsed<Expr>> {
+    // I really want there to be a way to consolidate the branches, but the different indices make it really difficult
+    // let op = tokens.peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| t.is_unary_operator() && t.matches_precedence(Precedence::Unary)));
+    if let Some(Parsed(lc, Ok(op))) = tokens
+            .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| t.is_unary_operator() && t.matches_precedence(Precedence::Unary)))
+        && let Some(Parsed(_, Ok(right))) = parse_unary_expr(tokens) {
+            Some(Parsed(lc, Ok(Expr::unary(op, right))))
+        } else {
+            parse_primary_expr(tokens)
+        }
+}
+
+fn parse_primary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Option<Parsed<Expr>> {
+    tokens
+        .peeking_next(|Parsed(_, r)| {
+            r.as_ref().is_ok_and(|t| {
+                *t != Token::OneChar(';') && *t != Token::OneChar('=') && *t != Token::OneChar('{')
+            })
+        })
+        .and_then(|Parsed(lc, r)| match r {
+            Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
+            Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
+            Ok(t) => Some(Parsed(
+                lc,
+                match t.try_convert_literal() {
+                    Ok(val) => Ok(Expr::Literal(val)),
+                    Err(token) => Err(anyhow!(ParseError::UnexpectedToken(token))),
+                },
+            )),
+            Err(e) => Some(Parsed(lc, Err(e))),
+        })
+}
+
+fn parse_grouping(
+    lc: (usize, usize),
+    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+) -> Option<Parsed<Expr>> {
+    parse_binary_expr(Precedence::Or, tokens).map(|Parsed(_, res)| {
+        Parsed(
+            lc,
+            res.and_then(|expr| {
+                if tokens
+                    .peeking_next(|Parsed(_, r)| {
+                        r.as_ref().is_ok_and(|t| *t == Token::OneChar(')'))
+                    })
+                    .is_none()
+                {
+                    Err(anyhow!(ParseError::ClosingParen))
+                } else {
+                    Ok(Expr::group(expr))
+                }
+            }),
+        )
+    })
+}
+
+/*****************************************************
+    Statement Parsing
+ *****************************************************/
+
+pub fn parse_statement(
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Option<Parsed<Statement>> {
+    use super::syntax::Keyword::*;
+    // Peeking because in the case of expression statements we don't want to consume a token
+    // peeking_next().and_then() might be able to get rid of the else, but we'll wait on that until it's more complete
+    if let Some(Parsed(_, res)) = tokens.peek() {
+        //println!("{res:?}");
+        match res {
+            Ok(token) => match token {
+                Token::OneChar('{') => Some(parse_block(tokens)),
+                Token::Keyword(Var) => Some(parse_var_dec(tokens)),
+                Token::Keyword(Print) => Some(parse_print_stmt(tokens)),
+                Token::Keyword(If) => Some(parse_if_statement(tokens)),
+                Token::Keyword(While) => Some(parse_while_statement(tokens)),
+                Token::Keyword(For) => Some(parse_for_statement(tokens)),
+                _ => Some(parse_expr_statement(tokens)),
+            },
+            _ => {
+                let Parsed(lc, res) = tokens.next().unwrap();
+                Some(Parsed(lc, Err(res.unwrap_err())))
+            }
+        }
+    } else {
+        None
+    }
+}
+
+fn check_semicolon(
+    statement: Statement,
+    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+) -> Result<Statement> {
+    tokens
+        .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
+        .map(|_| statement)
+        .ok_or(anyhow!(ParseError::MissingSemicolon))
 }
 
 // TODO: Fix this monstrosity
@@ -117,32 +391,6 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
     }
 }
 
-fn parse_assignment(
-    lvalue: Expr,
-    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
-) -> Result<Expr> {
-    tokens.next();
-    if lvalue.is_lvalue() {
-        match parse_binary_expr(Precedence::Or, tokens) {
-            Some(Parsed(_, Ok(rvalue))) => Ok(Expr::assignment(lvalue, rvalue)),
-            Some(Parsed(_, Err(err))) => Err(err),
-            None => Err(anyhow!(ParseError::StatementMissingExpr)),
-        }
-    } else {
-        Err(anyhow!("{lvalue}"))
-    }
-}
-
-fn check_semicolon(
-    statement: Statement,
-    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
-) -> Result<Statement> {
-    tokens
-        .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
-        .map(|_| statement)
-        .ok_or(anyhow!(ParseError::MissingSemicolon))
-}
-
 fn parse_print_stmt(
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Parsed<Statement> {
@@ -170,6 +418,8 @@ fn parse_expr_statement(
     }
 }
 
+
+/* CONTROL FLOW */
 // Currently I don't check for parentheses around if and while
 // it'd be trivial, I just don't see the point when it parses correctly
 fn parse_if_statement(
@@ -352,242 +602,6 @@ fn parse_block(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Pa
                 None
             ))),
         ),
-    }
-}
-
-fn parse_statement(
-    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
-) -> Option<Parsed<Statement>> {
-    use super::syntax::Keyword::*;
-    // Peeking because in the case of expression statements we don't want to consume a token
-    // peeking_next().and_then() might be able to get rid of the else, but we'll wait on that until it's more complete
-    if let Some(Parsed(_, res)) = tokens.peek() {
-        //println!("{res:?}");
-        match res {
-            Ok(token) => match token {
-                Token::OneChar('{') => Some(parse_block(tokens)),
-                Token::Keyword(Var) => Some(parse_var_dec(tokens)),
-                Token::Keyword(Print) => Some(parse_print_stmt(tokens)),
-                Token::Keyword(If) => Some(parse_if_statement(tokens)),
-                Token::Keyword(While) => Some(parse_while_statement(tokens)),
-                Token::Keyword(For) => Some(parse_for_statement(tokens)),
-                _ => Some(parse_expr_statement(tokens)),
-            },
-            _ => {
-                let Parsed(lc, res) = tokens.next().unwrap();
-                Some(Parsed(lc, Err(res.unwrap_err())))
-            }
-        }
-    } else {
-        None
-    }
-}
-
-pub fn parse(source: &str) -> impl PeekingNext<Item = Parsed<Statement>> + '_ {
-    scan_tokens(source).batching(parse_statement).peekable()
-}
-
-fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Option<Parsed<Expr>> {
-    let expr = parse_binary_expr(Precedence::Or, tokens)?;
-    match expr {
-        Parsed(lc, Ok(e)) => match tokens.peek() {
-            Some(Parsed(_, Ok(Token::OneChar('=')))) => {
-                Some(Parsed(lc, parse_assignment(e, tokens)))
-            }
-            _ => Some(Parsed(lc, Ok(e))),
-        },
-        Parsed(lc, Err(err)) => Some(Parsed(lc, Err(err))),
-    }
-}
-
-fn parse_binary_expr(
-    precedence: Precedence,
-    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
-) -> Option<Parsed<Expr>> {
-    if precedence < Precedence::Unary {
-        parse_binary_expr(precedence.next_highest(), tokens).map(|res| {
-            if let Parsed(lc, Ok(mut expr)) = res {
-                while let Some(Parsed(_, Ok(op))) = tokens.peeking_next(|Parsed(_, r)| {
-                    r.as_ref()
-                        .is_ok_and(|t| t.is_binary_operator() && t.matches_precedence(precedence))
-                }) {
-                    match parse_binary_expr(precedence.next_highest(), tokens) {
-                        Some(Parsed(_, Ok(right))) => expr = Expr::binary(expr, op, right),
-                        Some(err) => return err,
-                        None => break,
-                    }
-                }
-                Parsed(lc, Ok(expr))
-            } else {
-                res
-            }
-        })
-    } else {
-        parse_unary_expr(tokens)
-    }
-}
-
-fn parse_unary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Option<Parsed<Expr>> {
-    // I really want there to be a way to consolidate the branches, but the different indices make it really difficult
-    // let op = tokens.peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| t.is_unary_operator() && t.matches_precedence(Precedence::Unary)));
-    if let Some(Parsed(lc, Ok(op))) = tokens
-            .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| t.is_unary_operator() && t.matches_precedence(Precedence::Unary)))
-        && let Some(Parsed(_, Ok(right))) = parse_unary_expr(tokens) {
-            Some(Parsed(lc, Ok(Expr::unary(op, right))))
-        } else {
-            parse_primary_expr(tokens)
-        }
-}
-
-fn parse_primary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Option<Parsed<Expr>> {
-    tokens
-        .peeking_next(|Parsed(_, r)| {
-            r.as_ref().is_ok_and(|t| {
-                *t != Token::OneChar(';') && *t != Token::OneChar('=') && *t != Token::OneChar('{')
-            })
-        })
-        .and_then(|Parsed(lc, r)| match r {
-            Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
-            Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
-            Ok(t) => Some(Parsed(
-                lc,
-                match t.try_convert_literal() {
-                    Ok(val) => Ok(Expr::Literal(val)),
-                    Err(token) => Err(anyhow!(ParseError::UnexpectedToken(token))),
-                },
-            )),
-            Err(e) => Some(Parsed(lc, Err(e))),
-        })
-}
-
-fn parse_grouping(
-    lc: (usize, usize),
-    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
-) -> Option<Parsed<Expr>> {
-    parse_binary_expr(Precedence::Or, tokens).map(|Parsed(_, res)| {
-        Parsed(
-            lc,
-            res.and_then(|expr| {
-                if tokens
-                    .peeking_next(|Parsed(_, r)| {
-                        r.as_ref().is_ok_and(|t| *t == Token::OneChar(')'))
-                    })
-                    .is_none()
-                {
-                    Err(anyhow!(ParseError::ClosingParen))
-                } else {
-                    Ok(Expr::group(expr))
-                }
-            }),
-        )
-    })
-}
-
-fn scan_tokens(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>> + '_> {
-    source
-        .lines()
-        .enumerate()
-        .flat_map(|(i, line)| {
-            line.char_indices()
-                .peekable()
-                .batching(scan_token)
-                .map(move |(j, r)| Parsed((i + 1, j + 1), r))
-        })
-        .peekable()
-}
-
-fn scan_token(chars: &mut Peekable<CharIndices>) -> Option<(usize, Result<Token>)> {
-    chars.next().and_then(|(i, c)| match c {
-        '"' => {
-            let string = chars
-                .peeking_take_while(|&(_, c)| c != '"')
-                .map(|(_, c)| c)
-                .collect();
-            if let Some((_, '"')) = chars.next() {
-                Some((i, Ok(Token::String(string))))
-            } else {
-                // if the next char is not '"' as we specified it means we've reached the end of the line
-                Some((i, Err(anyhow!(ParseError::UnclosedString))))
-            }
-        }
-        // Code specific to handling comments
-        '/' => chars.peek().and_then(|ci| {
-            if ci.1 == '/' {
-                // another slash means we have a comment and can ignore the rest of the line after this point
-                None
-            } else {
-                Some((i, Ok(Token::OneChar('/'))))
-            }
-        }),
-        // One or two character tokens
-        '!' | '=' | '<' | '>' => Some((
-            i,
-            Ok(if chars.peeking_next(|ci| ci.1 == '=').is_some() {
-                Token::CharThenEqual(c)
-            } else {
-                Token::OneChar(c)
-            }),
-        )),
-
-        // Invariably single char tokens
-        '(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*' => {
-            Some((i, Ok(Token::OneChar(c))))
-        }
-        x if x.is_ascii_digit() => Some(parse_number(i, c, chars)),
-        a if a == '_' || a.is_ascii_alphabetic() => Some((i, Ok(parse_word(c, chars)))),
-        w if w.is_whitespace() => scan_token(chars),
-        _ => Some((i, Err(anyhow!(ParseError::InvalidToken(c))))),
-    })
-}
-
-fn parse_number(
-    start: usize,
-    first: char,
-    chars: &mut Peekable<CharIndices>,
-) -> (usize, Result<Token>) {
-    let mut chars_cl = chars.clone();
-    let number = chars_cl
-        .peeking_take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
-        .map(|(i, c)| (i - start, c));
-    let string: String = if let Some((mut i, c)) = number.last() {
-        // This only makes sure we are not including a trailing '.' with no digits following
-        // This could technically return an arbitrary chaining of digits and '.'
-        // but that can be handled by the int parsing, since it can't represent any other valid Lox syntax
-        // if the last char is '.' we take everything up to but excluding it, as it is either a function call or an error
-        if c == '.' {
-            i -= 1;
-        }
-        std::iter::once(first)
-            .chain(chars.take(i).map(|(_, c)| c))
-            .collect()
-    } else {
-        // Otherwise all we have is a single digit
-        String::from(first)
-    };
-
-    if let Ok(n) = string.parse::<f64>() {
-        (start, Ok(Token::Number(n)))
-    } else {
-        (start, Err(anyhow!(ParseError::ParseNumError(string))))
-    }
-}
-
-/// Parses a string of characters that can begin with a letter or '_', and determines whether it is an keyword or an identifier
-/// Returns a `Token` as this will always be valid, since we start with one valid character (which is a valid identifier alone) and stop at the first invalid character
-/// validating the identifier itself comes in the next pass.
-fn parse_word(first: char, chars: &mut Peekable<CharIndices>) -> Token {
-    let string: String = std::iter::once(first)
-        .chain(
-            chars
-                .peeking_take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
-                .map(|(_, c)| c),
-        )
-        .collect();
-
-    if let Some(k) = Keyword::get_from_str(&string) {
-        Token::Keyword(k)
-    } else {
-        Token::Identifier(string)
     }
 }
 

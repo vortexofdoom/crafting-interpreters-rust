@@ -223,7 +223,7 @@ pub fn run_prompt() -> Result<()> {
         print!("> ");
         std::io::stdout().flush().expect("new prompt failed");
         if std::io::stdin().read_line(&mut input).is_ok() {
-            if input.is_empty() {
+            if input == "\n" {
                 break;
             } else {
                 interpreter.run(&input)?;
