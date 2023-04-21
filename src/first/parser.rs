@@ -13,25 +13,21 @@ pub enum ParseError {
     UnexpectedToken(Token),
     MissingSemicolon,
     StatementMissingExpr,
-    UndefinedVariable(String),
+    // UndefinedVariable(String),
     Expected(ExpectedToken, Option<Token>),
 }
 
 #[derive(Debug, Clone)]
 pub enum ExpectedToken {
     Identifier,
-    Operator,
-    Semicolon,
-    ClosingParen,
+    Delimiter(char),
 }
 
 impl std::fmt::Display for ExpectedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExpectedToken::Identifier => write!(f, "identifier"),
-            ExpectedToken::Operator => write!(f, "operator"),
-            ExpectedToken::Semicolon => write!(f, ";"),
-            ExpectedToken::ClosingParen => write!(f, ")"),
+            ExpectedToken::Delimiter(c) => write!(f, "{c}"),
         }
     }
 }
@@ -50,7 +46,7 @@ impl std::fmt::Display for ParseError {
             ParseError::UnexpectedToken(t) => write!(f, "unexpected token {t}"),
             ParseError::MissingSemicolon => write!(f, "missing semicolon"),
             ParseError::StatementMissingExpr => write!(f, "statement requires an expression"),
-            ParseError::UndefinedVariable(s) => write!(f, "undefined variable {s}"),
+            // ParseError::UndefinedVariable(s) => write!(f, "undefined variable {s}"),
             ParseError::Expected(exp, found) => {
                 if let Some(token) = found {
                     write!(f, "expected {exp}, found {token}")
@@ -73,13 +69,18 @@ impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
     }
 }
 
+/// This should only get called if we have already peeked, know to advance, and do not need the token
+fn get_line_column(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> (usize, usize) {
+    tokens
+        .next()
+        .expect("should only be called when a token is known to exist")
+        .0
+}
+
 // TODO: Fix this monstrosity
-fn parse_var_dec(
-    start: (usize, usize),
-    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
-) -> Parsed<Statement> {
+fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Parsed<Statement> {
     // advancing past "var"
-    tokens.next();
+    let start = get_line_column(tokens);
     // short circuiting directly to primary since the only valid token is an identifier
     if let Some(Parsed(lc, Ok(Expr::Variable(name)))) = parse_primary_expr(tokens) {
         match tokens.next() {
@@ -137,22 +138,17 @@ fn check_semicolon(
     statement: Statement,
     tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
 ) -> Result<Statement> {
-    if tokens
+    tokens
         .peeking_next(|Parsed(_, r)| r.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
-        .is_some()
-    {
-        Ok(statement)
-    } else {
-        Err(anyhow!(ParseError::MissingSemicolon))
-    }
+        .map(|_| statement)
+        .ok_or(anyhow!(ParseError::MissingSemicolon))
 }
 
 fn parse_print_stmt(
-    start: (usize, usize),
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Parsed<Statement> {
     // advance past "print"
-    tokens.next();
+    let start = get_line_column(tokens);
     if let Some(Parsed(lc, res)) = parse_expr(tokens) {
         match res {
             Ok(expr) => Parsed(start, check_semicolon(Statement::Print(expr), tokens)),
@@ -175,18 +171,166 @@ fn parse_expr_statement(
     }
 }
 
-fn parse_block(
-    lc: (usize, usize),
+// Currently I don't check for parentheses around if and while
+// it'd be trivial, I just don't see the point when it parses correctly
+fn parse_if_statement(
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Parsed<Statement> {
+    use Keyword::*;
+    let lc = get_line_column(tokens);
+    match (parse_expr(tokens), parse_statement(tokens)) {
+        (Some(Parsed(_, Ok(cond))), Some(Parsed(_, Ok(if_exec)))) => match tokens
+            .peeking_next(|Parsed(_, res)| res.as_ref().is_ok_and(|t| *t == Token::Keyword(Else)))
+            .and_then(|_| parse_statement(tokens))
+        {
+            Some(Parsed(_, Ok(else_exec))) => Parsed(
+                lc,
+                Ok(Statement::If(
+                    cond,
+                    Box::new(if_exec),
+                    Some(Box::new(else_exec)),
+                )),
+            ),
+            None => Parsed(lc, Ok(Statement::If(cond, Box::new(if_exec), None))),
+            Some(err) => err,
+        },
+        (Some(Parsed(lc, Err(err))), _) | (_, Some(Parsed(lc, Err(err)))) => Parsed(lc, Err(err)),
+        // Could make this more robust in future, but currently it'll be some combination of 'Nones' and 'Errors'
+        _ => Parsed(lc, Err(anyhow!(ParseError::StatementMissingExpr))),
+    }
+}
+
+fn parse_while_statement(
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Parsed<Statement> {
+    let lc = get_line_column(tokens);
+    match (parse_expr(tokens), parse_statement(tokens)) {
+        (Some(Parsed(_, Ok(cond))), Some(Parsed(_, Ok(while_exec)))) => {
+            Parsed(lc, Ok(Statement::While(cond, Box::new(while_exec))))
+        }
+        (Some(Parsed(lc, Err(err))), _) | (_, Some(Parsed(lc, Err(err)))) => Parsed(lc, Err(err)),
+        // Could make this more robust in future, but currently it'll be some combination of 'Nones' and 'Errors' which is impossible to parse anyway
+        _ => Parsed(lc, Err(anyhow!(ParseError::StatementMissingExpr))),
+    }
+}
+
+fn parse_for_statement(
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Parsed<Statement> {
+    let lc = get_line_column(tokens);
+    let next = tokens
+        .peeking_next(|Parsed(_, res)| res.as_ref().is_ok_and(|t| *t == Token::OneChar('(')))
+        .unwrap_or_else(|| {
+            Parsed(
+                lc,
+                Err(anyhow!(ParseError::Expected(
+                    ExpectedToken::Delimiter('('),
+                    None
+                ))),
+            )
+        });
+
+    if let Parsed(lc, Err(err)) = next {
+        return Parsed(lc, Err(err));
+    }
+
+    let init = if tokens
+        .peeking_next(|Parsed(_, res)| res.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
+        .is_none()
+    {
+        let parsed =
+            parse_statement(tokens).expect("just checked that it wasn't last token or ';'");
+        match parsed {
+            Parsed(_, Err(_)) => return parsed,
+            Parsed(
+                _,
+                Ok(
+                    stmt @ (Statement::Declaration(Declaration::Variable(_, _))
+                    | Statement::Expression(_)),
+                ),
+            ) => Some(stmt),
+            Parsed(lc, Ok(s)) => return Parsed(lc, Err(anyhow!("{s} is not a valid initializer"))),
+        }
+    } else {
+        None
+    };
+
+    let cond = if tokens
+        .peeking_next(|Parsed(_, res)| res.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
+        .is_none()
+    {
+        let parsed =
+            parse_statement(tokens).expect("just checked that it wasn't last token or ';'");
+        match parsed {
+            Parsed(_, Err(_)) => return parsed,
+            Parsed(_, Ok(Statement::Expression(expr))) => Some(expr),
+            Parsed(lc, Ok(_stmt)) => return Parsed(lc, Err(anyhow!("invalid condition"))),
+        }
+    } else {
+        None
+    };
+    let inc = if tokens
+        .peeking_next(|Parsed(_, res)| res.as_ref().is_ok_and(|t| *t == Token::OneChar(';')))
+        .is_none()
+    {
+        match parse_expr(tokens).expect("just checked that there was a token") {
+            Parsed(lc, Err(err)) => return Parsed(lc, Err(err)),
+            Parsed(_, Ok(expr)) => Some(Statement::Expression(expr)),
+        }
+    } else {
+        None
+    };
+    if inc.is_some()
+        && tokens
+            .peeking_next(|Parsed(_, res)| res.as_ref().is_ok_and(|t| *t == Token::OneChar(')')))
+            .is_none()
+    {
+        return Parsed(
+            lc,
+            Err(anyhow!(ParseError::Expected(
+                ExpectedToken::Delimiter(')'),
+                None
+            ))),
+        );
+    }
+
+    let for_exec = if let Some(parsed) = parse_statement(tokens) {
+        if let Parsed(_, Ok(stmt)) = parsed {
+            match inc {
+                None => Some(stmt),
+                Some(inc) => Some(Statement::Block(vec![stmt, inc])),
+            }
+        } else {
+            return parsed;
+        }
+    } else {
+        None
+    };
+
+    let while_stmt = if let Some(cond) = cond
+    && let Some(while_exec) = for_exec {
+        Some(Statement::While(cond, Box::new(while_exec)))
+    } else {
+        None
+    };
+
+    Parsed(
+        lc,
+        Ok(Statement::Block(
+            [init, while_stmt].into_iter().flatten().collect(),
+        )),
+    )
+}
+
+fn parse_block(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Parsed<Statement> {
     // consume the '{'
-    tokens.next();
+    let lc = get_line_column(tokens);
 
     let mut vec = vec![];
     // loop to consume the whole block whether or not there is a parse error, for sync purposes
     while let Some(Parsed(_, Ok(token))) = tokens.peek()
     && *token != Token::OneChar('}') {
-        vec.push(parse_statement(tokens).unwrap_or(Parsed(lc, Err(anyhow!(ParseError::Expected(ExpectedToken::ClosingParen, None))))))
+        vec.push(parse_statement(tokens).unwrap_or(Parsed(lc, Err(anyhow!(ParseError::Expected(ExpectedToken::Delimiter('}'), None))))))
     }
 
     match tokens.peeking_next(|Parsed(_, res)| {
@@ -202,7 +346,13 @@ fn parse_block(
             }
         }
         Some(Parsed(lc, Err(err))) => Parsed(lc, Err(err)),
-        None => Parsed(lc, Err(anyhow!(ParseError::ClosingParen))),
+        None => Parsed(
+            lc,
+            Err(anyhow!(ParseError::Expected(
+                ExpectedToken::Delimiter('}'),
+                None
+            ))),
+        ),
     }
 }
 
@@ -212,12 +362,16 @@ fn parse_statement(
     use super::syntax::Keyword::*;
     // Peeking because in the case of expression statements we don't want to consume a token
     // peeking_next().and_then() might be able to get rid of the else, but we'll wait on that until it's more complete
-    if let Some(Parsed(lc, res)) = tokens.peek() {
+    if let Some(Parsed(_, res)) = tokens.peek() {
+        //println!("{res:?}");
         match res {
             Ok(token) => match token {
-                Token::Keyword(Var) => Some(parse_var_dec(*lc, tokens)),
-                Token::Keyword(Print) => Some(parse_print_stmt(*lc, tokens)),
-                Token::OneChar('{') => Some(parse_block(*lc, tokens)),
+                Token::OneChar('{') => Some(parse_block(tokens)),
+                Token::Keyword(Var) => Some(parse_var_dec(tokens)),
+                Token::Keyword(Print) => Some(parse_print_stmt(tokens)),
+                Token::Keyword(If) => Some(parse_if_statement(tokens)),
+                Token::Keyword(While) => Some(parse_while_statement(tokens)),
+                Token::Keyword(For) => Some(parse_for_statement(tokens)),
                 _ => Some(parse_expr_statement(tokens)),
             },
             _ => {
@@ -241,7 +395,9 @@ fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Opt
             Some(Parsed(_, Ok(Token::OneChar('=')))) => {
                 Some(Parsed(lc, parse_assignment(e, tokens)))
             }
-            Some(Parsed(_, Ok(t))) if *t == Token::OneChar(';') => Some(Parsed(lc, Ok(e))),
+            Some(Parsed(_, Ok(Token::OneChar(';') | Token::OneChar('{')))) => {
+                Some(Parsed(lc, Ok(e)))
+            }
             Some(Parsed(tlc, Ok(t))) => Some(Parsed(
                 *tlc,
                 Err(anyhow!(ParseError::UnexpectedToken(t.clone()))),
@@ -298,8 +454,9 @@ fn parse_primary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Op
     use itertools::Either::*;
     tokens
         .peeking_next(|Parsed(_, r)| {
-            r.as_ref()
-                .is_ok_and(|t| *t != Token::OneChar(';') && *t != Token::OneChar('='))
+            r.as_ref().is_ok_and(|t| {
+                *t != Token::OneChar(';') && *t != Token::OneChar('=') && *t != Token::OneChar('{')
+            })
         })
         .and_then(|Parsed(lc, r)| match r {
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
@@ -360,8 +517,8 @@ fn scan_token(chars: &mut Peekable<CharIndices>) -> Option<(usize, Result<Token>
                 .collect();
             if let Some((_, '"')) = chars.next() {
                 Some((i, Ok(Token::String(string))))
-            // if the next char is not '"' as we specified it means we reached the end of the string
             } else {
+                // if the next char is not '"' as we specified it means we've reached the end of the line
                 Some((i, Err(anyhow!(ParseError::UnclosedString))))
             }
         }

@@ -16,7 +16,7 @@ use syntax::{Expr, LoxVal, Statement, Token};
 #[derive(Debug)]
 pub enum RuntimeError {
     UndefinedVariable(String),
-    InvalidLValue(Expr),
+    InvalidLValue(String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -30,32 +30,34 @@ impl std::fmt::Display for RuntimeError {
 
 pub struct Interpreter {
     names: ChainMap<String, LoxVal>,
+    curr_scope_depth: usize,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
         Self {
             names: ChainMap::new(HashMap::new()),
+            curr_scope_depth: 0,
         }
     }
 
-    fn evaluate(&mut self, expr: Expr) -> Result<LoxVal> {
+    fn evaluate(&mut self, expr: &Expr) -> Result<LoxVal> {
         match expr {
-            Expr::Grouping(expr) => self.evaluate(*expr),
-            Expr::Binary(l, op, r) => self.eval_binary(*l, op, *r),
-            Expr::Unary(op, r) => self.eval_unary(op, *r),
+            Expr::Grouping(expr) => self.evaluate(expr),
+            Expr::Binary(l, op, r) => self.eval_binary(l, op, r),
+            Expr::Unary(op, r) => self.eval_unary(op, r),
             // Assignments evaluate to the right hand side for the purposes of print
-            Expr::Assignment(_, rval) => self.evaluate(*rval),
+            Expr::Assignment(_, rval) => self.evaluate(rval),
             Expr::Variable(name) => self
                 .names
-                .get(&name)
+                .get(name)
                 .cloned()
-                .ok_or(anyhow!(RuntimeError::UndefinedVariable(name))),
-            Expr::Literal(val) => Ok(val),
+                .ok_or(anyhow!(RuntimeError::UndefinedVariable(name.clone()))),
+            Expr::Literal(val) => Ok(val.clone()),
         }
     }
 
-    fn eval_binary(&mut self, l: Expr, op: Token, r: Expr) -> Result<LoxVal> {
+    fn eval_binary(&mut self, l: &Expr, op: &Token, r: &Expr) -> Result<LoxVal> {
         use syntax::Keyword::*;
         match op {
             // Simple Arithmetic operations
@@ -108,7 +110,7 @@ impl Interpreter {
             // For instance, an `and` statement with the left operand being truthy will always return the right operand whether it's truthy or not
             Token::Keyword(And) => {
                 let left = self.evaluate(l)?;
-                if !left.truthy() {
+                if !left.is_truthy() {
                     Ok(left)
                 } else {
                     self.evaluate(r)
@@ -116,7 +118,7 @@ impl Interpreter {
             }
             Token::Keyword(Or) => {
                 let left = self.evaluate(l)?;
-                if left.truthy() {
+                if left.is_truthy() {
                     Ok(left)
                 } else {
                     self.evaluate(r)
@@ -126,45 +128,62 @@ impl Interpreter {
         }
     }
 
-    fn eval_unary(&mut self, op: Token, right: Expr) -> Result<LoxVal> {
+    fn eval_unary(&mut self, op: &Token, right: &Expr) -> Result<LoxVal> {
         match (op, self.evaluate(right)?) {
-            (Token::OneChar('!'), o) => Ok(LoxVal::Boolean(!o.truthy())),
+            (Token::OneChar('!'), o) => Ok(LoxVal::Boolean(!o.is_truthy())),
             (Token::OneChar('-'), LoxVal::Number(n)) => Ok(LoxVal::Number(-n)),
             (Token::OneChar('-'), o) => Err(anyhow!("cannot negate {o}")),
             (t, _) => Err(anyhow!("{t} is not a valid unary operator")),
         }
     }
 
-    fn interpret(&mut self, stmt: Statement) -> Result<()> {
+    fn interpret(&mut self, stmt: &Statement) -> Result<()> {
         use syntax::Declaration::*;
         match stmt {
             Statement::Declaration(Variable(name, assignment)) => {
-                let value = self.evaluate(assignment.unwrap_or(Expr::Literal(LoxVal::Nil)))?;
-                self.names.insert(name, value);
+                let value =
+                    self.evaluate(assignment.as_ref().unwrap_or(&Expr::Literal(LoxVal::Nil)))?;
+                self.names.insert(name.clone(), value);
             }
             Statement::Print(expr) => println!("{}", self.evaluate(expr)?),
             Statement::Expression(expr) => match expr {
                 Expr::Assignment(lval, rval) => {
-                    if let Expr::Variable(name) = *lval {
-                        let rval = self.evaluate(*rval)?;
-                        if let Some(entry) = self.names.get_mut(&name) {
+                    if let Expr::Variable(ref name) = **lval {
+                        let rval = self.evaluate(rval)?;
+                        if let Some(entry) = self.names.get_mut(name) {
                             *entry = rval;
                         } else {
-                            return Err(anyhow!(RuntimeError::UndefinedVariable(name)));
+                            return Err(anyhow!(RuntimeError::UndefinedVariable(name.clone())));
                         }
                     } else {
-                        return Err(anyhow!(RuntimeError::InvalidLValue(*lval)));
+                        return Err(anyhow!(RuntimeError::InvalidLValue(lval.to_string())));
                     }
                 }
                 // Statements like `False;` or `5 * 23 || True;` do not do anything. They are not errors, just no-ops
-                _ => {}
+                _ => {
+                    self.evaluate(expr)?;
+                }
             },
             Statement::Block(stmts) => {
+                self.curr_scope_depth += 1;
                 self.names.new_child();
                 for s in stmts {
                     self.interpret(s)?;
                 }
                 self.names.remove_child();
+                self.curr_scope_depth -= 1;
+            }
+            Statement::If(cond, if_exec, else_exec) => {
+                if self.evaluate(cond)?.is_truthy() {
+                    self.interpret(if_exec)?;
+                } else if let Some(stmt) = else_exec {
+                    self.interpret(stmt)?;
+                }
+            }
+            Statement::While(cond, exec) => {
+                while self.evaluate(cond)?.is_truthy() {
+                    self.interpret(exec)?;
+                }
             }
         }
         Ok(())
@@ -172,8 +191,9 @@ impl Interpreter {
 
     pub fn run(&mut self, source: &str) -> Result<()> {
         for stmt in parse(source) {
+            //println!("{:?}", stmt.1);
             match stmt.1 {
-                Ok(stmt) => self.interpret(stmt)?,
+                Ok(stmt) => self.interpret(&stmt)?,
                 Err(err) => println!("{err}"),
             }
         }

@@ -122,7 +122,7 @@ impl Keyword {
             "and" => Some(And),
             "class" => Some(Class),
             "else" => Some(Else),
-            "false" => Some(False),
+            "False" => Some(False),
             "fun" => Some(Fun),
             "for" => Some(For),
             "if" => Some(If),
@@ -132,7 +132,7 @@ impl Keyword {
             "return" => Some(Return),
             "super" => Some(Super),
             "this" => Some(This),
-            "true" => Some(True),
+            "True" => Some(True),
             "var" => Some(Var),
             "while" => Some(While),
             _ => None,
@@ -153,7 +153,7 @@ pub enum LoxVal {
 
 impl LoxVal {
     /// Lox's rules for conversion into boolean values are simple: False and Nil are falsey, any other value (even 0) is truthy
-    pub fn truthy(&self) -> bool {
+    pub fn is_truthy(&self) -> bool {
         // might want to make this return a LoxVal::Boolean
         match self {
             LoxVal::String(_) => true,
@@ -275,7 +275,7 @@ impl Precedence {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Expr {
     Grouping(Box<Expr>),
     Binary(Box<Expr>, Token, Box<Expr>),
@@ -321,7 +321,7 @@ impl Expr {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Declaration {
     Variable(String, Option<Expr>),
 }
@@ -340,12 +340,14 @@ impl std::fmt::Display for Declaration {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Statement {
     Declaration(Declaration),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
+    If(Expr, Box<Statement>, Option<Box<Statement>>),
+    While(Expr, Box<Statement>),
 }
 
 impl std::fmt::Display for Statement {
