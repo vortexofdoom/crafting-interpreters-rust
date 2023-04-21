@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use itertools::Either;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
@@ -39,16 +38,15 @@ impl Token {
         matches!(self, Token::OneChar('-' | '!'))
     }
 
-    pub fn try_convert_literal(self) -> Either<LoxVal, Self> {
-        use itertools::Either::*;
+    pub fn try_convert_literal(self) -> Result<LoxVal, Self> {
         use Keyword::*;
         match self {
-            Token::String(s) => Left(LoxVal::String(s)),
-            Token::Number(n) => Left(LoxVal::Number(n)),
-            Token::Keyword(True) => Left(LoxVal::Boolean(true)),
-            Token::Keyword(False) => Left(LoxVal::Boolean(false)),
-            Token::Keyword(Nil) => Left(LoxVal::Nil),
-            _ => Right(self),
+            Token::String(s) => Ok(LoxVal::String(s)),
+            Token::Number(n) => Ok(LoxVal::Number(n)),
+            Token::Keyword(True) => Ok(LoxVal::Boolean(true)),
+            Token::Keyword(False) => Ok(LoxVal::Boolean(false)),
+            Token::Keyword(Nil) => Ok(LoxVal::Nil),
+            _ => Err(self),
         }
     }
 
@@ -116,7 +114,7 @@ impl std::fmt::Display for Keyword {
 }
 
 impl Keyword {
-    pub fn try_from_str(s: &str) -> Option<Self> {
+    pub fn get_from_str(s: &str) -> Option<Self> {
         use Keyword::*;
         match s {
             "and" => Some(And),

@@ -451,7 +451,6 @@ fn parse_unary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Opti
 }
 
 fn parse_primary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Option<Parsed<Expr>> {
-    use itertools::Either::*;
     tokens
         .peeking_next(|Parsed(_, r)| {
             r.as_ref().is_ok_and(|t| {
@@ -464,8 +463,8 @@ fn parse_primary_expr(tokens: &mut impl PeekingNext<Item = Parsed<Token>>) -> Op
             Ok(t) => Some(Parsed(
                 lc,
                 match t.try_convert_literal() {
-                    Left(val) => Ok(Expr::Literal(val)),
-                    Right(token) => Err(anyhow!(ParseError::UnexpectedToken(token))),
+                    Ok(val) => Ok(Expr::Literal(val)),
+                    Err(token) => Err(anyhow!(ParseError::UnexpectedToken(token))),
                 },
             )),
             Err(e) => Some(Parsed(lc, Err(e))),
@@ -596,7 +595,7 @@ fn parse_word(first: char, chars: &mut Peekable<CharIndices>) -> Token {
         )
         .collect();
 
-    if let Some(k) = Keyword::try_from_str(&string) {
+    if let Some(k) = Keyword::get_from_str(&string) {
         Token::Keyword(k)
     } else {
         Token::Identifier(string)
