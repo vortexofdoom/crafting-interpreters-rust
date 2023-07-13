@@ -1,17 +1,18 @@
 mod parser;
 mod syntax;
 
-use self::parser::parse;
+use parser::parse;
+use syntax::{Expr, Function, LoxVal, Statement, Token};
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use hash_chain::ChainMap;
-use syntax::{Expr, LoxVal, Statement, Token};
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -30,17 +31,33 @@ impl std::fmt::Display for RuntimeError {
 
 pub struct Interpreter {
     names: ChainMap<String, LoxVal>,
-    curr_scope_depth: usize,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
-        Self {
-            names: ChainMap::new(HashMap::new()),
-            curr_scope_depth: 0,
-        }
+        Self { names: ChainMap::new(HashMap::new()) }
     }
 
+    fn get_cloned(&self, name: &str) -> Option<LoxVal> {
+        self.names.get(name).cloned()
+    }
+
+    #[inline]
+    fn get_mut(&mut self, name: &str) -> Option<&mut LoxVal> {
+        self.names.get_mut(name)
+    }
+
+    #[inline]
+    fn open_scope(&mut self) {
+        self.names.new_child();
+    }
+
+    #[inline]
+    fn close_scope(&mut self) {
+        self.names.remove_child();
+    }
+
+    // Probably want to return references to LoxObj
     fn evaluate(&mut self, expr: &Expr) -> Result<LoxVal> {
         match expr {
             Expr::Grouping(expr) => self.evaluate(expr),
@@ -49,11 +66,40 @@ impl Interpreter {
             // Assignments evaluate to the right hand side for the purposes of print
             Expr::Assignment(_, rval) => self.evaluate(rval),
             Expr::Variable(name) => self
-                .names
-                .get(name)
-                .cloned()
+                .get_cloned(name)
                 .ok_or(anyhow!(RuntimeError::UndefinedVariable(name.clone()))),
             Expr::Literal(val) => Ok(val.clone()),
+            Expr::Call(callee, args) => self.eval_call(callee, args),
+        }
+    }
+
+    // TODO: Get rid of cloning
+    fn eval_call(&mut self, callee: &Box<Expr>, args: &[Expr]) -> Result<LoxVal> {
+        if let Expr::Variable(s) = callee.as_ref()
+        && s == "clock" {
+            return Ok(LoxVal::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0));
+        }
+        if let LoxVal::Function(function) = self.evaluate(callee)? {
+            self.open_scope();
+            for (param, arg) in std::iter::zip(&function.params, args) {
+                // The only way this will error is if the supplied argument is a syntactically valid expr that doesn't evaluate successfully
+                let val = self.evaluate(arg)?;
+                if let Err(e) = self.interpret(&Statement::VarDec(
+                    String::from(param),
+                    Some(Expr::Literal(val)),
+                )) {
+                    self.close_scope();
+                    return Err(e);
+                }
+            }
+            let result = self.interpret(&function.body);
+            self.close_scope();
+            match result {
+                Ok(o) => Ok(o.into()),
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(anyhow!("{callee} is not a Lox callable!"))
         }
     }
 
@@ -128,6 +174,18 @@ impl Interpreter {
         }
     }
 
+    fn eval_block(&mut self, stmts: &[Statement]) -> Result<Option<LoxVal>> {
+        self.open_scope();
+        for s in stmts {
+            if let Some(obj) = self.interpret(s)? {
+                self.close_scope();
+                return Ok(Some(obj));
+            }
+        }
+        self.close_scope();
+        Ok(None)
+    }
+
     fn eval_unary(&mut self, op: &Token, right: &Expr) -> Result<LoxVal> {
         match (op, self.evaluate(right)?) {
             (Token::OneChar('!'), o) => Ok(LoxVal::Boolean(!o.is_truthy())),
@@ -137,10 +195,10 @@ impl Interpreter {
         }
     }
 
-    fn interpret(&mut self, stmt: &Statement) -> Result<()> {
-        use syntax::Declaration::*;
+    // TODO: Remove cloning
+    fn interpret(&mut self, stmt: &Statement) -> Result<Option<LoxVal>> {
         match stmt {
-            Statement::Declaration(Variable(name, assignment)) => {
+            Statement::VarDec(name, assignment) => {
                 let value =
                     self.evaluate(assignment.as_ref().unwrap_or(&Expr::Literal(LoxVal::Nil)))?;
                 self.names.insert(name.clone(), value);
@@ -150,7 +208,7 @@ impl Interpreter {
                 Expr::Assignment(lval, rval) => {
                     if let Expr::Variable(ref name) = **lval {
                         let rval = self.evaluate(rval)?;
-                        if let Some(entry) = self.names.get_mut(name) {
+                        if let Some(entry) = self.get_mut(name) {
                             *entry = rval;
                         } else {
                             return Err(anyhow!(RuntimeError::UndefinedVariable(name.clone())));
@@ -159,41 +217,53 @@ impl Interpreter {
                         return Err(anyhow!(RuntimeError::InvalidLValue(lval.to_string())));
                     }
                 }
-                // Statements like `False;` or `5 * 23 || True;` do not do anything. They are not errors, just no-ops
+                // Statements like `False;` or `5 * 23 or True;` do not do anything. They are not errors, just no-ops
                 _ => {
                     self.evaluate(expr)?;
                 }
             },
-            Statement::Block(stmts) => {
-                self.curr_scope_depth += 1;
-                self.names.new_child();
-                for s in stmts {
-                    self.interpret(s)?;
-                }
-                self.names.remove_child();
-                self.curr_scope_depth -= 1;
-            }
+            Statement::Block(stmts) => return self.eval_block(stmts),
             Statement::If(cond, if_exec, else_exec) => {
-                if self.evaluate(cond)?.is_truthy() {
-                    self.interpret(if_exec)?;
-                } else if let Some(stmt) = else_exec {
-                    self.interpret(stmt)?;
+                if self.evaluate(cond)?.is_truthy()
+                && let Some(o) = self.interpret(if_exec)? {
+                    return Ok(Some(o));
+                } else if let Some(stmt) = else_exec
+                && let Some(o) = self.interpret(stmt)? {
+                    return Ok(Some(o));
                 }
             }
             Statement::While(cond, exec) => {
                 while self.evaluate(cond)?.is_truthy() {
-                    self.interpret(exec)?;
+                    if let Some(o) = self.interpret(exec)? {
+                        return Ok(Some(o));
+                    }
+                }
+            }
+            Statement::FunDec(name, params, body) => {
+                self.names.insert(
+                    name.clone(),
+                    LoxVal::Function(Box::new(Function {
+                        params: params.clone(),
+                        body: body.clone(),
+                    })),
+                );
+            }
+            Statement::Return(expr) => {
+                if let Some(expr) = expr {
+                    return Ok(Some(self.evaluate(expr)?));
                 }
             }
         }
-        Ok(())
+        // Unless we return early with a value, interpreting a statement should not end by returning anything
+        Ok(None)
     }
 
     pub fn run(&mut self, source: &str) -> Result<()> {
         for stmt in parse(source) {
-            //println!("{:?}", stmt.1);
             match stmt.1 {
-                Ok(stmt) => self.interpret(&stmt)?,
+                Ok(stmt) => {
+                    self.interpret(&stmt)?;
+                }
                 Err(err) => println!("{err}"),
             }
         }

@@ -1,3 +1,5 @@
+use std::{collections::HashMap, fmt::Display};
+
 use anyhow::{anyhow, Result};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -64,6 +66,7 @@ impl Token {
         }
     }
 
+    #[inline]
     pub fn matches_precedence(&self, precedence: Precedence) -> bool {
         self.highest_valid_precedence() >= precedence
     }
@@ -139,25 +142,58 @@ impl Keyword {
 }
 
 /// Simple wrapper type for Lox values
-/// So that we can take advantage of Rust's type system and built in behavior when possible
-/// But have the freedom to diverge and customize where necessary
+/// so that we can take advantage of Rust's type system and built in behavior when possible,
+/// but have the freedom to diverge and customize where necessary
 #[derive(Debug, Clone)]
 pub enum LoxVal {
     String(String),
     Number(f64),
     Boolean(bool),
+    // TODO: These can probably be references
+    Function(Box<Function>),
     Nil,
 }
 
+// This just makes None semantically equivalent to Nil
+impl From<Option<LoxVal>> for LoxVal {
+    fn from(value: Option<LoxVal>) -> Self {
+        match value {
+            Some(o) => o,
+            None => Self::Nil,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Function {
+    pub params: Vec<String>,
+    pub body: Box<Statement>,
+}
+
+// pub struct Method {
+//     pub params: Vec<String>,
+//     pub body: Vec<Statement>,
+// }
+
+#[derive(Debug, PartialEq)]
+pub struct Class {
+    members: HashMap<String, LoxVal>,
+}
+
+// #[derive(Debug, Clone, PartialEq)]
+// pub struct Instance<'a> {
+//     members: &'a HashMap<String, LoxObj<'a>>,
+//     fields: HashMap<String, LoxObj<'a>>,
+// }
+
 impl LoxVal {
-    /// Lox's rules for conversion into boolean values are simple: False and Nil are falsey, any other value (even 0) is truthy
+    /// Lox's rules for conversion into boolean values are simple: False and Nil are "falsey", any other value (even 0) is "truthy"
     pub fn is_truthy(&self) -> bool {
         // might want to make this return a LoxVal::Boolean
         match self {
-            LoxVal::String(_) => true,
-            LoxVal::Number(_) => true,
-            LoxVal::Boolean(b) => *b,
-            LoxVal::Nil => false,
+            Self::Boolean(b) => *b,
+            Self::Nil => false,
+            _ => true,
         }
     }
 }
@@ -165,11 +201,12 @@ impl LoxVal {
 impl std::fmt::Display for LoxVal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoxVal::String(s) => write!(f, "{s}"),
-            LoxVal::Number(n) => write!(f, "{n}"),
-            LoxVal::Boolean(true) => write!(f, "True"),
-            LoxVal::Boolean(false) => write!(f, "False"),
-            LoxVal::Nil => write!(f, "nil"),
+            Self::String(s) => write!(f, "{s}"),
+            Self::Number(n) => write!(f, "{n}"),
+            Self::Boolean(true) => write!(f, "True"),
+            Self::Boolean(false) => write!(f, "False"),
+            Self::Function(_) => write!(f, "<fun>"), // TODO: maybe make it display better
+            Self::Nil => write!(f, "nil"),
         }
     }
 }
@@ -181,10 +218,8 @@ impl std::ops::Add<LoxVal> for LoxVal {
     type Output = Result<LoxVal>;
     fn add(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (LoxVal::String(_), _) | (_, LoxVal::String(_)) => {
-                Ok(LoxVal::String(format!("{self}{rhs}")))
-            }
-            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x + y)),
+            (Self::String(_), _) | (_, Self::String(_)) => Ok(Self::String(format!("{self}{rhs}"))),
+            (Self::Number(x), Self::Number(y)) => Ok(Self::Number(x + y)),
             _ => Err(anyhow!("cannot add {self} and {rhs}")),
         }
     }
@@ -195,7 +230,7 @@ impl std::ops::Sub<LoxVal> for LoxVal {
     type Output = Result<LoxVal>;
     fn sub(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x - y)),
+            (Self::Number(x), Self::Number(y)) => Ok(Self::Number(x - y)),
             _ => Err(anyhow!("cannot subtract {rhs} from {self}")),
         }
     }
@@ -217,7 +252,7 @@ impl std::ops::Div<LoxVal> for LoxVal {
     type Output = Result<LoxVal>;
     fn div(self, rhs: LoxVal) -> Self::Output {
         match (&self, &rhs) {
-            (LoxVal::Number(x), LoxVal::Number(y)) => Ok(LoxVal::Number(x / y)),
+            (Self::Number(x), Self::Number(y)) => Ok(Self::Number(x / y)),
             _ => Err(anyhow!("cannot divide {self} and {rhs}")),
         }
     }
@@ -228,10 +263,10 @@ impl std::ops::Div<LoxVal> for LoxVal {
 impl PartialEq for LoxVal {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (LoxVal::Boolean(l), LoxVal::Boolean(r)) => l == r,
-            (LoxVal::Number(l), LoxVal::Number(r)) => l == r,
-            (LoxVal::String(l), LoxVal::String(r)) => l == r,
-            (LoxVal::Nil, LoxVal::Nil) => true,
+            (Self::Boolean(l), Self::Boolean(r)) => l == r,
+            (Self::Number(l), Self::Number(r)) => l == r,
+            (Self::String(l), Self::String(r)) => l == r,
+            (Self::Nil, Self::Nil) => true,
             _ => false,
         }
     }
@@ -240,7 +275,7 @@ impl PartialEq for LoxVal {
 impl std::cmp::PartialOrd for LoxVal {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (LoxVal::Number(x), LoxVal::Number(y)) => x.partial_cmp(y),
+            (Self::Number(x), Self::Number(y)) => x.partial_cmp(y),
             _ => None,
         }
     }
@@ -273,12 +308,13 @@ impl Precedence {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
     Grouping(Box<Expr>),
     Binary(Box<Expr>, Token, Box<Expr>),
     Unary(Token, Box<Expr>),
     Assignment(Box<Expr>, Box<Expr>),
+    Call(Box<Expr>, Vec<Expr>),
     Variable(String),
     Literal(LoxVal),
 }
@@ -291,6 +327,7 @@ impl std::fmt::Display for Expr {
             Expr::Binary(l, op, r) => write!(f, "({l} {op} {r})"),
             Expr::Variable(s) => write!(f, "{s}"),
             Expr::Assignment(l, r) => write!(f, "{l} = {r}"),
+            Expr::Call(l, args) => write!(f, "{l}({})", itertools::join(args, ", ")),
             Expr::Unary(op, r) => write!(f, "({op}{r})"),
         }
     }
@@ -314,47 +351,56 @@ impl Expr {
         Self::Grouping(Box::new(self))
     }
 
+    pub fn fun_call(expr: Expr, args: Vec<Expr>) -> Self {
+        Self::Call(Box::new(expr), args)
+    }
+
     pub fn is_lvalue(&self) -> bool {
         matches!(self, Expr::Variable(_))
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Declaration {
-    Variable(String, Option<Expr>),
+#[derive(Debug, PartialEq, Clone)]
+pub enum Statement {
+    VarDec(String, Option<Expr>),
+    FunDec(String, Vec<String>, Box<Statement>),
+    Expression(Expr),
+    Print(Expr),
+    Block(Vec<Statement>),
+    If(Expr, Box<Statement>, Option<Box<Statement>>),
+    While(Expr, Box<Statement>),
+    Return(Option<Expr>),
 }
 
-impl std::fmt::Display for Declaration {
+impl std::fmt::Display for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Variable(name, assign) => {
+            Self::VarDec(name, assign) => {
                 if let Some(expr) = assign {
                     write!(f, "var {name} = {expr}")
                 } else {
                     write!(f, "var {name}")
                 }
             }
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Statement {
-    Declaration(Declaration),
-    Expression(Expr),
-    Print(Expr),
-    Block(Vec<Statement>),
-    If(Expr, Box<Statement>, Option<Box<Statement>>),
-    While(Expr, Box<Statement>),
-}
-
-impl std::fmt::Display for Statement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Declaration(d) => write!(f, "{d}"),
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
-            _ => todo!(),
+            Self::FunDec(name, params, block) => write!(f, "fun {name}({params:?}): {block}"),
+            Self::Block(stmts) => write!(f, "Block:\n{stmts:?}\nEnd Block"),
+            Self::If(cond, if_exec, else_exec) => {
+                if let Some(stmt) = else_exec {
+                    write!(f, "if {cond}: {if_exec} else: {stmt}")
+                } else {
+                    write!(f, "if {cond}: {if_exec}")
+                }
+            }
+            Self::While(cond, exec) => write!(f, "while {cond}: {exec}"),
+            Self::Return(expr) => {
+                if let Some(e) = expr {
+                    write!(f, "return {e}")
+                } else {
+                    write!(f, "return nil")
+                }
+            }
         }
     }
 }
