@@ -1,4 +1,4 @@
-use super::syntax::{Expr, Keyword, Precedence, Statement, Token};
+use super::syntax::{Expr, Keyword, LoxVal, Precedence, Statement, Token};
 use anyhow::{anyhow, Result};
 
 use itertools::{Itertools, PeekingNext};
@@ -61,6 +61,18 @@ impl std::fmt::Display for ParseError {
 #[derive(Debug)]
 pub struct Parsed<T>(pub (usize, usize), pub Result<T>);
 
+impl Parsed<Token> {
+    fn error_from_expected<U>(self, expected: ExpectedToken) -> Parsed<U> {
+        match self.1 {
+            Ok(t) => Parsed(
+                self.0,
+                Err(anyhow!(ParseError::Expected(expected, Some(t)))),
+            ),
+            Err(e) => Parsed(self.0, Err(e)),
+        }
+    }
+}
+
 impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.1 {
@@ -91,6 +103,10 @@ fn get_line_column<T>(tokens: &mut Peekable<impl Iterator<Item = Parsed<T>>>) ->
 }
 
 pub fn parse(source: &str) -> Peekable<impl Iterator<Item = Parsed<Statement>> + '_> {
+    // let tokens = scan_tokens(source);
+    // for t in tokens {
+    //     println!("{t:?}");
+    // }
     scan_tokens(source).batching(parse_statement).peekable()
 }
 
@@ -143,7 +159,7 @@ fn scan_token(chars: &mut Peekable<CharIndices>) -> Option<(usize, Result<Token>
             }),
         )),
 
-        // Invariably single char tokens
+        // Invariably single character tokens
         '(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*' => {
             Some((i, Ok(Token::OneChar(c))))
         }
@@ -213,6 +229,7 @@ fn parse_word(first: char, chars: &mut Peekable<CharIndices>) -> Token {
 
 fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Option<Parsed<Expr>> {
     let expr = parse_binary_expr(Precedence::Or, tokens)?;
+    //let res =
     match expr {
         Parsed(lc, Ok(e)) => match tokens.peeking_next(|t| *t == Token::OneChar('=')) {
             Some(Parsed(xy, _)) => {
@@ -232,6 +249,7 @@ fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Opt
         },
         Parsed(lc, Err(err)) => Some(Parsed(lc, Err(err))),
     }
+    //; println!("{}", res.as_ref().unwrap_or(&Parsed((0, 0), Err(anyhow!("EOF"))))); res
 }
 
 fn binary_parse_loop(
@@ -321,6 +339,21 @@ fn parse_primary_expr(
         .and_then(|Parsed(lc, r)| match r {
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
             Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
+            Ok(Token::Keyword(Keyword::Fun)) => {
+                if tokens.peeking_next(|t| *t == Token::OneChar('(')).is_none() {
+                    return match tokens.next() {
+                        Some(p) => Some(p.error_from_expected(ExpectedToken::Delimiter('('))),
+                        None => Some(Parsed(
+                            (lc.0, lc.1 + 5),
+                            Err(anyhow!(ParseError::Expected(
+                                ExpectedToken::Delimiter('('),
+                                None
+                            ))),
+                        )),
+                    };
+                }
+                Some(parse_fun(lc, tokens))
+            }
             Ok(t) => Some(Parsed(
                 lc,
                 match t.try_convert_literal() {
@@ -460,86 +493,97 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
     }
 }
 
+fn parse_fun(
+    start: (usize, usize),
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Parsed<Expr> {
+    let mut params = vec![];
+    while let Some(Parsed((l, c), Ok(Token::Identifier(name)))) = tokens.peeking_next(|t| {
+        t.1.as_ref()
+            .is_ok_and(|t| matches!(t, Token::Identifier(_)))
+    }) {
+        params.push(name);
+        match tokens.peek() {
+            Some(Parsed(_, Ok(Token::OneChar(',')))) => continue,
+            Some(Parsed(_, Ok(Token::OneChar(')')))) => break,
+            _ => {
+                let next = tokens.next().unwrap_or(Parsed(
+                    (l, c + params.last().unwrap().len()),
+                    Err(anyhow!(ParseError::Expected(
+                        ExpectedToken::Delimiter(')'),
+                        None
+                    ))),
+                ));
+
+                let res = match next.1 {
+                    Ok(t) => Err(anyhow!("expected ',' or ')', found {t}")),
+                    Err(e) => Err(e),
+                };
+                return Parsed(next.0, res);
+            }
+        }
+    }
+    let end = get_line_column(tokens);
+
+    match parse_statement(tokens) {
+        Some(Parsed(_, Ok(block @ Statement::Block(_)))) => {
+            Parsed(start, Ok(Expr::Literal(LoxVal::fun(params, block))))
+        }
+        Some(Parsed(lc, Ok(stmt))) => Parsed(lc, Err(anyhow!("Expected block, found {stmt}"))),
+        Some(Parsed(lc, Err(e))) => Parsed(lc, Err(e)),
+        _ => Parsed(
+            end,
+            Err(anyhow!(ParseError::Expected(
+                ExpectedToken::Delimiter('{'),
+                None
+            ))),
+        ),
+    }
+}
+
 fn parse_fun_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Parsed<Statement> {
     // advancing past "fun"
     let start = get_line_column(tokens);
-    match (tokens.next(), tokens.next()) {
-        (Some(Parsed(_, Ok(Token::Identifier(name)))), Some(t)) if t == Token::OneChar('(') => {
-            let mut params = vec![];
-            while let Some(Parsed((l, c), Ok(Token::Identifier(name)))) = tokens.peeking_next(|t| {
-                t.1.as_ref()
-                    .is_ok_and(|t| matches!(t, Token::Identifier(_)))
-            }) {
-                params.push(name);
-                match tokens.peek() {
-                    Some(Parsed(_, Ok(Token::OneChar(',')))) => continue,
-                    Some(Parsed(_, Ok(Token::OneChar(')')))) => break,
-                    _ => {
-                        let next = tokens.next().unwrap_or(Parsed(
-                            (l, c + params.last().unwrap().len()),
-                            Err(anyhow!(ParseError::Expected(
-                                ExpectedToken::Delimiter(')'),
-                                None
-                            ))),
-                        ));
-
-                        let res = match next.1 {
-                            Ok(t) => Err(anyhow!("expected ',' or ')', found {t}")),
-                            Err(e) => Err(e),
-                        };
-                        return Parsed(next.0, res);
-                    }
-                }
+    let name = match tokens.next() {
+        // Named function declaration
+        Some(Parsed(_, Ok(Token::Identifier(name)))) => {
+            if tokens.peeking_next(|t| *t == Token::OneChar('(')).is_none() {
+                return match tokens.next() {
+                    Some(p) => p.error_from_expected(ExpectedToken::Delimiter('(')),
+                    None => Parsed(
+                        (start.0, start.1 + name.len()),
+                        Err(anyhow!(ParseError::Expected(
+                            ExpectedToken::Delimiter('('),
+                            None
+                        ))),
+                    ),
+                };
             }
-            let end = get_line_column(tokens);
-
-            match parse_statement(tokens) {
-                Some(Parsed(_, Ok(block @ Statement::Block(_)))) => {
-                    Parsed(start, Ok(Statement::FunDec(name, params, Box::new(block))))
-                }
-                Some(Parsed(lc, Ok(stmt))) => {
-                    Parsed(lc, Err(anyhow!("Expected block, found {stmt}")))
-                }
-                Some(Parsed(lc, Err(e))) => Parsed(lc, Err(e)),
-                _ => Parsed(
-                    end,
-                    Err(anyhow!(ParseError::Expected(
-                        ExpectedToken::Delimiter('{'),
-                        None
-                    ))),
-                ),
-            }
+            Some(name)
         }
-        (Some(Parsed(_, Ok(Token::Identifier(_)))), Some(Parsed(lc, Ok(t)))) => Parsed(
-            lc,
-            Err(anyhow!(ParseError::Expected(
-                ExpectedToken::Delimiter('('),
-                Some(t)
-            ))),
-        ),
-        (Some(Parsed(_, Ok(Token::Identifier(_)))), Some(Parsed(lc, Err(e)))) => Parsed(lc, Err(e)),
-        (Some(Parsed((l, c), Ok(Token::Identifier(name)))), None) => Parsed(
-            (l, c + name.len()),
-            Err(anyhow!(ParseError::Expected(
-                ExpectedToken::Delimiter('('),
-                None
-            ))),
-        ),
-        (Some(Parsed(lc, Ok(t))), _) => Parsed(
-            lc,
-            Err(anyhow!(ParseError::Expected(
-                ExpectedToken::Identifier,
-                Some(t)
-            ))),
-        ),
-        (Some(Parsed(lc, Err(e))), _) => Parsed(lc, Err(e)),
-        (None, _) => Parsed(
-            (start.0, start.1 + 5),
-            Err(anyhow!(ParseError::Expected(
-                ExpectedToken::Identifier,
-                None
-            ))),
-        ),
+        // Anonymous function declaration
+        Some(Parsed(_, Ok(Token::OneChar('(')))) => None,
+        Some(Parsed(lc, Ok(t))) => {
+            return Parsed(
+                lc,
+                Err(anyhow!(
+                    "Expected identifier or '(', but instead found {t}."
+                )),
+            )
+        }
+        Some(Parsed(lc, Err(e))) => return Parsed(lc, Err(e)),
+        None => {
+            return Parsed(
+                (start.0, start.1 + 5),
+                Err(anyhow!(
+                    "Expected identifier or '(', but instead found nothing."
+                )),
+            )
+        }
+    };
+    match parse_fun(start, tokens) {
+        Parsed(_, Ok(f)) => Parsed(start, Ok(Statement::FunDec(name, f))),
+        Parsed(lc, Err(e)) => Parsed(lc, Err(e)),
     }
 }
 

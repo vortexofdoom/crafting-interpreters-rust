@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display};
+use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 
@@ -196,6 +196,13 @@ impl LoxVal {
             _ => true,
         }
     }
+
+    pub fn fun(params: Vec<String>, body: Statement) -> Self {
+        Self::Function(Box::new(Function {
+            params,
+            body: Box::new(body),
+        }))
+    }
 }
 
 impl std::fmt::Display for LoxVal {
@@ -363,7 +370,7 @@ impl Expr {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
     VarDec(String, Option<Expr>),
-    FunDec(String, Vec<String>, Box<Statement>),
+    FunDec(Option<String>, Expr),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
@@ -384,7 +391,18 @@ impl std::fmt::Display for Statement {
             }
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
-            Self::FunDec(name, params, block) => write!(f, "fun {name}({params:?}): {block}"),
+            Self::FunDec(name, fun) => {
+                let Expr::Literal(LoxVal::Function(fun)) = fun else { unreachable!() };
+                if let Some(name) = name {
+                    write!(f, "fun {name}(")?;
+                } else {
+                    write!(f, "fun (")?;
+                }
+                for p in fun.params.iter() {
+                    write!(f, "{p}, ")?;
+                }
+                write!(f, "): {}", fun.body)
+            }
             Self::Block(stmts) => write!(f, "Block:\n{stmts:?}\nEnd Block"),
             Self::If(cond, if_exec, else_exec) => {
                 if let Some(stmt) = else_exec {

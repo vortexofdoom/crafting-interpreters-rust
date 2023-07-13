@@ -35,7 +35,9 @@ pub struct Interpreter {
 
 impl Interpreter {
     pub fn new() -> Self {
-        Self { names: ChainMap::new(HashMap::new()) }
+        Self {
+            names: ChainMap::new(HashMap::new()),
+        }
     }
 
     fn get_cloned(&self, name: &str) -> Option<LoxVal> {
@@ -75,6 +77,7 @@ impl Interpreter {
 
     // TODO: Get rid of cloning
     fn eval_call(&mut self, callee: &Box<Expr>, args: &[Expr]) -> Result<LoxVal> {
+        // TODO: This is a hack
         if let Expr::Variable(s) = callee.as_ref()
         && s == "clock" {
             return Ok(LoxVal::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0));
@@ -239,14 +242,16 @@ impl Interpreter {
                     }
                 }
             }
-            Statement::FunDec(name, params, body) => {
-                self.names.insert(
-                    name.clone(),
-                    LoxVal::Function(Box::new(Function {
-                        params: params.clone(),
-                        body: body.clone(),
-                    })),
-                );
+            Statement::FunDec(name, fun) => {
+                let func = self.evaluate(fun).unwrap();
+                if let Some(name) = name {
+                    self.names.insert(
+                        name.clone(),
+                        func,
+                    );
+                } else {
+                    return Ok(Some(func));
+                }
             }
             Statement::Return(expr) => {
                 if let Some(expr) = expr {
