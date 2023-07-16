@@ -504,7 +504,9 @@ fn parse_fun(
     }) {
         params.push(name);
         match tokens.peek() {
-            Some(Parsed(_, Ok(Token::OneChar(',')))) => continue,
+            Some(Parsed(_, Ok(Token::OneChar(',')))) => {
+                tokens.next();
+            }
             Some(Parsed(_, Ok(Token::OneChar(')')))) => break,
             _ => {
                 let next = tokens.next().unwrap_or(Parsed(
