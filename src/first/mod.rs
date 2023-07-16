@@ -2,61 +2,272 @@ mod parser;
 mod syntax;
 
 use parser::parse;
-use syntax::{Expr, Function, LoxVal, Statement, Token};
+use syntax::{Expr, LoxVal, Statement, Token};
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::ops::Deref;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
+use by_address::ByAddress;
 use clap::Parser;
-use hash_chain::ChainMap;
+
+use self::syntax::Function;
 
 #[derive(Debug)]
 pub enum RuntimeError {
     UndefinedVariable(String),
+    AlreadyDeclared(String),
     InvalidLValue(String),
+}
+
+enum FunctionType {
+    Function,
 }
 
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RuntimeError::UndefinedVariable(name) => write!(f, "undefined variable '{name}'"),
+            RuntimeError::AlreadyDeclared(name) => {
+                write!(f, "Already a variable named {name} in this scope.")
+            }
             RuntimeError::InvalidLValue(expr) => write!(f, "{expr} is not a valid lvalue"),
         }
     }
 }
 
+struct Resolver<'a> {
+    scopes: Vec<(HashMap<String, (bool, usize)>, usize)>,
+    env: &'a mut Scope,
+    curr_fun: Option<FunctionType>,
+}
+
+impl<'a> Resolver<'a> {
+    fn resolve(env: &'a mut Scope, stmts: &[Statement]) -> Result<()> {
+        let mut resolver = Self {
+            scopes: vec![(HashMap::new(), 0)],
+            env,
+            curr_fun: None,
+        };
+
+        for stmt in stmts {
+            //println!("{stmt}");
+            resolver.resolve_stmt(stmt)?;
+        }
+        // println!("{:#?}", resolver.env.locals);
+        // println!("{}", resolver.env.scopes[0][0]);
+        Ok(())
+    }
+
+    fn open(&mut self) {
+        self.scopes.push((HashMap::new(), 0));
+    }
+
+    fn close(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn declare(&mut self, name: &str) -> Result<()> {
+        // If there is no local scope, this is a global variable.
+        //println!("{name}");
+        if let Some(scope) = self.scopes.last_mut() {
+            if scope
+                .0
+                .insert(String::from(name), (false, scope.1))
+                .is_some()
+            {
+                return Err(anyhow!(RuntimeError::AlreadyDeclared(String::from(name))));
+            }
+            scope.1 += 1;
+        }
+
+        println!("{:?}", self.scopes.last());
+        Ok(())
+    }
+
+    fn define(&mut self, name: &str) -> Result<()> {
+        // println!("{name}");
+        if let Some(v) = self.scopes.last_mut().and_then(|s| s.0.get_mut(name)) {
+            v.0 = true;
+        }
+        Ok(())
+    }
+
+    fn resolve_local(&mut self, name: &str, expr: &'a Expr) -> Result<()> {
+        println!("local: {expr}");
+        if !self.scopes.is_empty() {
+            let len = self.scopes.len() - 1;
+            for i in (0..len).rev() {
+                if let Some((_, n)) = self.scopes[i].0.get(name) {
+                    println!("hello! {name}");
+                    self.env.locals.insert(expr as *const Expr, (i, *n));
+                    break;
+                }
+            }
+        }
+        println!("local {name} {:?}", self.env.locals.get(&(expr as *const Expr)));
+        Ok(())
+    }
+
+    fn resolve_stmt(&mut self, stmt: &'a Statement) -> Result<()> {
+        match stmt {
+            Statement::VarDec(n, v) => {
+                self.declare(n)?;
+                if let Some(e) = v {
+                    self.resolve_expr(e)?;
+                }
+                self.define(n)
+            }
+            Statement::FunDec(n, f) => {
+                if let Some(n) = n {
+                    println!("fun {n}");
+                    self.declare(n)?;
+                    self.define(n)?;
+                }
+
+                self.resolve_function(f)
+            }
+            Statement::Expression(e) => self.resolve_expr(e),
+            Statement::Print(e) => self.resolve_expr(e),
+            Statement::Block(stmts) => {
+                self.open();
+                for stmt in stmts {
+                    self.resolve_stmt(stmt)?;
+                }
+                self.close();
+                Ok(())
+            }
+            Statement::If(cond, if_exec, else_exec) => {
+                self.resolve_expr(cond)?;
+                self.resolve_stmt(if_exec)?;
+                if let Some(s) = else_exec {
+                    self.resolve_stmt(s)?;
+                }
+                Ok(())
+            }
+            Statement::While(cond, exec) => {
+                self.resolve_expr(cond)?;
+                self.resolve_stmt(exec)
+            }
+            Statement::Return(e) => match e {
+                Some(e) => self.resolve_expr(e),
+                None => Ok(()),
+            },
+        }
+    }
+
+    fn resolve_expr(&mut self, expr: &'a Expr) -> Result<()> {
+        match expr {
+            Expr::Grouping(e) => self.resolve_expr(e),
+            Expr::Binary(l, _, r) => {
+                self.resolve_expr(l)?;
+                self.resolve_expr(r)
+            }
+            Expr::Unary(_, r) => self.resolve_expr(r),
+            Expr::Assignment(n, e) => {
+                self.resolve_expr(e)?;
+                self.resolve_expr(n)
+            }
+            Expr::Call(callee, args) => {
+                self.resolve_expr(callee)?;
+                for arg in args {
+                    self.resolve_expr(arg)?;
+                }
+                Ok(())
+            }
+            Expr::Variable(name) => {
+                println!("variable: {name}");
+                match self.scopes.last().and_then(|(m, _)| m.get(name)) {
+                    Some((false, _)) => Err(anyhow!(
+                        "Can't read local variable {name} in its own initializer."
+                    )),
+                    _ => self.resolve_local(name, expr),
+                }
+            }
+            Expr::Literal(_) => Ok(()),
+        }
+    }
+
+    fn resolve_function(&mut self, fun: &'a Function) -> Result<()> {
+        self.open();
+        for param in fun.params.iter() {
+            self.declare(param)?;
+            self.define(param)?;
+        }
+        self.resolve_stmt(&fun.body)?;
+        self.close();
+        Ok(())
+    }
+}
+
+struct Scope {
+    globals: HashMap<String, LoxVal>,
+    locals: HashMap<*const Expr, (usize, usize)>,
+    scopes: Vec<Vec<LoxVal>>,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Self {
+            globals: HashMap::new(),
+            locals: HashMap::new(),
+            scopes: vec![],
+        }
+    }
+
+    fn get(&self, name: &str, expr: &Expr) -> Option<&LoxVal> {
+        match self.locals.get(&(expr as *const Expr)) {
+            Some((depth, idx)) => Some(&self.scopes[self.scopes.len() - 1 - depth][*idx]),
+            None => self.globals.get(name),
+        }
+    }
+
+    fn get_mut(&mut self, name: &str, expr: &Expr) -> Option<&mut LoxVal> {
+        match self.locals.get(&(expr as *const Expr)) {
+            Some((depth, idx)) => {
+                let depth = self.scopes.len() - 1 - depth;
+                Some(&mut self.scopes[depth][*idx])
+            }
+            None => self.globals.get_mut(name),
+        }
+    }
+
+    fn insert(&mut self, name: &str, val: LoxVal) {
+        if self.scopes.is_empty() {
+            self.globals.insert(String::from(name), val);
+        } else {
+            self.scopes
+                .last_mut()
+                .expect("just checked if globals was empty?")
+                .push(val);
+            println!("{:?}", self.scopes.last().unwrap());
+        }
+    }
+
+    #[inline]
+    fn open(&mut self) {
+        self.scopes.push(vec![]);
+    }
+
+    #[inline]
+    fn close(&mut self) {
+        self.scopes.pop();
+    }
+}
+
 pub struct Interpreter {
-    names: ChainMap<String, LoxVal>,
+    scope: Scope,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
         Self {
-            names: ChainMap::new(HashMap::new()),
+            scope: Scope::new(),
         }
-    }
-
-    fn get_cloned(&self, name: &str) -> Option<LoxVal> {
-        self.names.get(name).cloned()
-    }
-
-    #[inline]
-    fn get_mut(&mut self, name: &str) -> Option<&mut LoxVal> {
-        self.names.get_mut(name)
-    }
-
-    #[inline]
-    fn open_scope(&mut self) {
-        self.names.new_child();
-    }
-
-    #[inline]
-    fn close_scope(&mut self) {
-        self.names.remove_child();
     }
 
     // Probably want to return references to LoxObj
@@ -67,15 +278,12 @@ impl Interpreter {
             Expr::Unary(op, r) => self.eval_unary(op, r),
             // Assignments evaluate to the right hand side for the purposes of print
             Expr::Assignment(_, rval) => self.evaluate(rval),
-            Expr::Variable(name) => self
-                .get_cloned(name)
-                .ok_or(anyhow!(RuntimeError::UndefinedVariable(name.clone()))),
+            Expr::Variable(name) => Ok(self.scope.get(name, expr).cloned().unwrap_or(LoxVal::Nil)),
             Expr::Literal(val) => Ok(val.clone()),
             Expr::Call(callee, args) => self.eval_call(callee, args),
         }
     }
 
-    // TODO: Get rid of cloning
     fn eval_call(&mut self, callee: &Box<Expr>, args: &[Expr]) -> Result<LoxVal> {
         // TODO: This is a hack
         if let Expr::Variable(s) = callee.as_ref()
@@ -83,7 +291,7 @@ impl Interpreter {
             return Ok(LoxVal::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0));
         }
         if let LoxVal::Function(function) = self.evaluate(callee)? {
-            self.open_scope();
+            self.scope.open();
             for (param, arg) in std::iter::zip(&function.params, args) {
                 // The only way this will error is if the supplied argument is a syntactically valid expr that doesn't evaluate successfully
                 let val = self.evaluate(arg)?;
@@ -91,16 +299,16 @@ impl Interpreter {
                     String::from(param),
                     Some(Expr::Literal(val)),
                 )) {
-                    self.close_scope();
+                    self.scope.close();
                     return Err(e);
                 }
             }
-            let result = self.interpret(&function.body);
-            self.close_scope();
-            match result {
-                Ok(o) => Ok(o.into()),
+            let result = match self.interpret(&function.body) {
+                Ok(o) => Ok(LoxVal::from(o)),
                 Err(e) => Err(e),
-            }
+            };
+            self.scope.close();
+            result
         } else {
             Err(anyhow!("{callee} is not a Lox callable!"))
         }
@@ -178,14 +386,14 @@ impl Interpreter {
     }
 
     fn eval_block(&mut self, stmts: &[Statement]) -> Result<Option<LoxVal>> {
-        self.open_scope();
+        self.scope.open();
         for s in stmts {
             if let Some(obj) = self.interpret(s)? {
-                self.close_scope();
-                return Ok(Some(obj));
+                self.scope.close();
+                return Ok(Some(obj.clone()));
             }
         }
-        self.close_scope();
+        self.scope.close();
         Ok(None)
     }
 
@@ -204,14 +412,14 @@ impl Interpreter {
             Statement::VarDec(name, assignment) => {
                 let value =
                     self.evaluate(assignment.as_ref().unwrap_or(&Expr::Literal(LoxVal::Nil)))?;
-                self.names.insert(name.clone(), value);
+                self.scope.insert(name, value);
             }
             Statement::Print(expr) => println!("{}", self.evaluate(expr)?),
             Statement::Expression(expr) => match expr {
                 Expr::Assignment(lval, rval) => {
                     if let Expr::Variable(ref name) = **lval {
                         let rval = self.evaluate(rval)?;
-                        if let Some(entry) = self.get_mut(name) {
+                        if let Some(entry) = self.scope.get_mut(name, &lval) {
                             *entry = rval;
                         } else {
                             return Err(anyhow!(RuntimeError::UndefinedVariable(name.clone())));
@@ -243,14 +451,10 @@ impl Interpreter {
                 }
             }
             Statement::FunDec(name, fun) => {
-                let func = self.evaluate(fun).unwrap();
                 if let Some(name) = name {
-                    self.names.insert(
-                        name.clone(),
-                        func,
-                    );
+                    self.scope.insert(name, LoxVal::Function(fun.clone()));
                 } else {
-                    return Ok(Some(func));
+                    return Ok(Some(LoxVal::Function(fun.clone())));
                 }
             }
             Statement::Return(expr) => {
@@ -264,13 +468,14 @@ impl Interpreter {
     }
 
     pub fn run(&mut self, source: &str) -> Result<()> {
-        for stmt in parse(source) {
-            match stmt.1 {
-                Ok(stmt) => {
-                    self.interpret(&stmt)?;
+        match parse(source) {
+            Ok(stmts) => {
+                Resolver::resolve(&mut self.scope, &stmts)?;
+                for s in &stmts {
+                    self.interpret(s)?;
                 }
-                Err(err) => println!("{err}"),
             }
+            Err(errs) => errs.iter().for_each(|e| println!("{e}")),
         }
         Ok(())
     }

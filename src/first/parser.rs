@@ -1,4 +1,4 @@
-use super::syntax::{Expr, Keyword, LoxVal, Precedence, Statement, Token};
+use super::syntax::{Expr, Keyword, LoxVal, Precedence, Statement, Token, Function};
 use anyhow::{anyhow, Result};
 
 use itertools::{Itertools, PeekingNext};
@@ -102,12 +102,17 @@ fn get_line_column<T>(tokens: &mut Peekable<impl Iterator<Item = Parsed<T>>>) ->
         .0
 }
 
-pub fn parse(source: &str) -> Peekable<impl Iterator<Item = Parsed<Statement>> + '_> {
+pub fn parse(source: &str) -> Result<Vec<Statement>, Vec<Parsed<Statement>>> {
     // let tokens = scan_tokens(source);
     // for t in tokens {
     //     println!("{t:?}");
     // }
-    scan_tokens(source).batching(parse_statement).peekable()
+    let stmts = scan_tokens(source).batching(parse_statement).collect_vec();
+    if stmts.iter().all(|p| p.1.is_ok()) {
+        Ok(stmts.into_iter().map(|p| p.1.unwrap()).collect())
+    } else {
+        Err(stmts.into_iter().filter(|p| p.1.is_err()).collect())
+    }
 }
 
 /*****************************************************
@@ -339,21 +344,22 @@ fn parse_primary_expr(
         .and_then(|Parsed(lc, r)| match r {
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
             Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
-            Ok(Token::Keyword(Keyword::Fun)) => {
-                if tokens.peeking_next(|t| *t == Token::OneChar('(')).is_none() {
-                    return match tokens.next() {
-                        Some(p) => Some(p.error_from_expected(ExpectedToken::Delimiter('('))),
-                        None => Some(Parsed(
-                            (lc.0, lc.1 + 5),
-                            Err(anyhow!(ParseError::Expected(
-                                ExpectedToken::Delimiter('('),
-                                None
-                            ))),
-                        )),
-                    };
-                }
-                Some(parse_fun(lc, tokens))
-            }
+            Ok(Token::Keyword(Keyword::Fun)) => None,
+            // {
+            //     if tokens.peeking_next(|t| *t == Token::OneChar('(')).is_none() {
+            //         return match tokens.next() {
+            //             Some(p) => Some(p.error_from_expected(ExpectedToken::Delimiter('('))),
+            //             None => Some(Parsed(
+            //                 (lc.0, lc.1 + 5),
+            //                 Err(anyhow!(ParseError::Expected(
+            //                     ExpectedToken::Delimiter('('),
+            //                     None
+            //                 ))),
+            //             )),
+            //         };
+            //     }
+            //     Some(parse_fun(lc, tokens))
+            // }
             Ok(t) => Some(Parsed(
                 lc,
                 match t.try_convert_literal() {
@@ -496,7 +502,7 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
 fn parse_fun(
     start: (usize, usize),
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
-) -> Parsed<Expr> {
+) -> Parsed<Function> {
     let mut params = vec![];
     while let Some(Parsed((l, c), Ok(Token::Identifier(name)))) = tokens.peeking_next(|t| {
         t.1.as_ref()
@@ -504,7 +510,7 @@ fn parse_fun(
     }) {
         params.push(name);
         match tokens.peek() {
-            Some(Parsed(_, Ok(Token::OneChar(',')))) => continue,
+            Some(Parsed(_, Ok(Token::OneChar(',')))) => { tokens.next(); },
             Some(Parsed(_, Ok(Token::OneChar(')')))) => break,
             _ => {
                 let next = tokens.next().unwrap_or(Parsed(
@@ -527,7 +533,7 @@ fn parse_fun(
 
     match parse_statement(tokens) {
         Some(Parsed(_, Ok(block @ Statement::Block(_)))) => {
-            Parsed(start, Ok(Expr::Literal(LoxVal::fun(params, block))))
+            Parsed(start, Ok(Function { params, body: Box::new(block) }))
         }
         Some(Parsed(lc, Ok(stmt))) => Parsed(lc, Err(anyhow!("Expected block, found {stmt}"))),
         Some(Parsed(lc, Err(e))) => Parsed(lc, Err(e)),
@@ -582,7 +588,7 @@ fn parse_fun_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
         }
     };
     match parse_fun(start, tokens) {
-        Parsed(_, Ok(f)) => Parsed(start, Ok(Statement::FunDec(name, f))),
+        Parsed(_, Ok(f)) => Parsed(start, Ok(Statement::FunDec(name, Box::new(f)))),
         Parsed(lc, Err(e)) => Parsed(lc, Err(e)),
     }
 }

@@ -196,13 +196,6 @@ impl LoxVal {
             _ => true,
         }
     }
-
-    pub fn fun(params: Vec<String>, body: Statement) -> Self {
-        Self::Function(Box::new(Function {
-            params,
-            body: Box::new(body),
-        }))
-    }
 }
 
 impl std::fmt::Display for LoxVal {
@@ -342,26 +335,32 @@ impl std::fmt::Display for Expr {
 
 impl Expr {
     // Constructors to avoid Box::new() for every constructed expression
+    #[inline]
     pub fn assignment(lvalue: Expr, rvalue: Expr) -> Self {
         Self::Assignment(Box::new(lvalue), Box::new(rvalue))
     }
 
+    #[inline]
     pub fn binary(left: Expr, operator: Token, right: Expr) -> Self {
         Self::Binary(Box::new(left), operator, Box::new(right))
     }
 
+    #[inline]
     pub fn unary(operator: Token, right: Expr) -> Self {
         Self::Unary(operator, Box::new(right))
     }
 
+    #[inline]
     pub fn group(self) -> Self {
         Self::Grouping(Box::new(self))
     }
 
+    #[inline]
     pub fn fun_call(expr: Expr, args: Vec<Expr>) -> Self {
         Self::Call(Box::new(expr), args)
     }
 
+    #[inline]
     pub fn is_lvalue(&self) -> bool {
         matches!(self, Expr::Variable(_))
     }
@@ -370,7 +369,7 @@ impl Expr {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
     VarDec(String, Option<Expr>),
-    FunDec(Option<String>, Expr),
+    FunDec(Option<String>, Box<Function>),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
@@ -392,7 +391,6 @@ impl std::fmt::Display for Statement {
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
             Self::FunDec(name, fun) => {
-                let Expr::Literal(LoxVal::Function(fun)) = fun else { unreachable!() };
                 if let Some(name) = name {
                     write!(f, "fun {name}(")?;
                 } else {
