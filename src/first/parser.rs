@@ -1,4 +1,4 @@
-use super::syntax::{Expr, Keyword, LoxVal, Precedence, Statement, Token, Function};
+use super::syntax::{Expr, Function, Keyword, LoxVal, Precedence, Statement, Token};
 use anyhow::{anyhow, Result};
 
 use itertools::{Itertools, PeekingNext};
@@ -340,9 +340,9 @@ fn parse_primary_expr(
     tokens
         .peeking_next(|t| {
             *t != Token::OneChar(';')
-            && *t != Token::OneChar('=')
-            && *t != Token::OneChar('{')
-            && *t != Token::Keyword(Keyword::Fun)
+                && *t != Token::OneChar('=')
+                && *t != Token::OneChar('{')
+                && *t != Token::Keyword(Keyword::Fun)
         })
         .and_then(|Parsed(lc, r)| match r {
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
@@ -430,7 +430,7 @@ fn parse_return_stmt(
     match expr {
         Some(Parsed(_, Ok(expr))) => Parsed(
             start,
-            check_semicolon(Statement::Return(Some(expr)), tokens),
+            check_semicolon(Statement::return_stmt(Some(expr)), tokens),
         ),
         Some(Parsed(lc, Err(err))) => Parsed(lc, Err(err)),
         None => Parsed(start, check_semicolon(Statement::Return(None), tokens)),
@@ -463,7 +463,7 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
                     .unwrap_or(Err(anyhow!(ParseError::UnexpectedToken(Token::OneChar(
                         '='
                     )))))
-                    .and_then(|expr| check_semicolon(Statement::VarDec(name, Some(expr)), tokens));
+                    .and_then(|expr| check_semicolon(Statement::var_dec(name, Some(expr)), tokens));
                 if stmt_res.is_err() {
                     lc = eq_idx;
                 }
@@ -497,7 +497,9 @@ fn parse_fun(
     }) {
         params.push(name);
         match tokens.peek() {
-            Some(Parsed(_, Ok(Token::OneChar(',')))) => { tokens.next(); },
+            Some(Parsed(_, Ok(Token::OneChar(',')))) => {
+                tokens.next();
+            }
             Some(Parsed(_, Ok(Token::OneChar(')')))) => break,
             _ => {
                 let next = tokens.next().unwrap_or(Parsed(
@@ -519,9 +521,13 @@ fn parse_fun(
     let end = get_line_column(tokens);
 
     match parse_statement(tokens) {
-        Some(Parsed(_, Ok(block @ Statement::Block(_)))) => {
-            Parsed(start, Ok(Function { params, body: Box::new(block) }))
-        }
+        Some(Parsed(_, Ok(block @ Statement::Block(_)))) => Parsed(
+            start,
+            Ok(Function {
+                params,
+                body: Box::new(block),
+            }),
+        ),
         Some(Parsed(lc, Ok(stmt))) => Parsed(lc, Err(anyhow!("Expected block, found {stmt}"))),
         Some(Parsed(lc, Err(e))) => Parsed(lc, Err(e)),
         _ => Parsed(
@@ -587,7 +593,7 @@ fn parse_print_stmt(
     let start = get_line_column(tokens);
     if let Some(Parsed(lc, res)) = parse_expr(tokens) {
         match res {
-            Ok(expr) => Parsed(start, check_semicolon(Statement::Print(expr), tokens)),
+            Ok(expr) => Parsed(start, check_semicolon(Statement::print_stmt(expr), tokens)),
             Err(err) => Parsed(lc, Err(err)),
         }
     } else {
@@ -602,7 +608,7 @@ fn parse_expr_statement(
         parse_expr(tokens).expect("we're only calling this when we've already peeked a token");
 
     match res {
-        Ok(expr) => Parsed(lc, check_semicolon(Statement::Expression(expr), tokens)),
+        Ok(expr) => Parsed(lc, check_semicolon(Statement::expr_stmt(expr), tokens)),
         Err(err) => Parsed(lc, Err(err)),
     }
 }
@@ -622,13 +628,9 @@ fn parse_if_statement(
         {
             Some(Parsed(_, Ok(else_exec))) => Parsed(
                 lc,
-                Ok(Statement::If(
-                    cond,
-                    Box::new(if_exec),
-                    Some(Box::new(else_exec)),
+                Ok(Statement::if_stmt(cond, if_exec, Some(else_exec)),
                 )),
-            ),
-            None => Parsed(lc, Ok(Statement::If(cond, Box::new(if_exec), None))),
+            None => Parsed(lc, Ok(Statement::if_stmt(cond, if_exec, None))),
             Some(err) => err,
         },
         (Some(Parsed(lc, Err(err))), _) | (_, Some(Parsed(lc, Err(err)))) => Parsed(lc, Err(err)),
@@ -642,8 +644,8 @@ fn parse_while_statement(
 ) -> Parsed<Statement> {
     let lc = get_line_column(tokens);
     match (parse_expr(tokens), parse_statement(tokens)) {
-        (Some(Parsed(_, Ok(cond))), Some(Parsed(_, Ok(while_exec)))) => {
-            Parsed(lc, Ok(Statement::While(cond, Box::new(while_exec))))
+        (Some(Parsed(_, Ok(cond))), Some(Parsed(_, Ok(Statement::Block(while_exec))))) => {
+            Parsed(lc, Ok(Statement::while_stmt(cond, while_exec)))
         }
         (Some(Parsed(lc, Err(err))), _) | (_, Some(Parsed(lc, Err(err)))) => Parsed(lc, Err(err)),
         // Could make this more robust in future, but currently it'll be some combination of 'Nones' and 'Errors' which is impossible to parse anyway
@@ -700,7 +702,7 @@ fn parse_for_statement(
     let inc = if tokens.peeking_next(|t| *t == Token::OneChar(';')).is_none() {
         match parse_expr(tokens).expect("just checked that there was a token") {
             Parsed(lc, Err(err)) => return Parsed(lc, Err(err)),
-            Parsed(_, Ok(expr)) => Some(Statement::Expression(expr)),
+            Parsed(_, Ok(expr)) => Some(Statement::expr_stmt(expr)),
         }
     } else {
         None
