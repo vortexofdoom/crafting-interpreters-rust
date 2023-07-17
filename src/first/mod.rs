@@ -75,6 +75,7 @@ impl<'a> Resolver<'a> {
         // If there is no local scope, this is a global variable.
         //println!("{name}");
         if let Some(scope) = self.scopes.last_mut() {
+            println!("declaring {name} in local scope");
             if scope
                 .0
                 .insert(String::from(name), (false, scope.1))
@@ -220,6 +221,7 @@ impl Scope {
     }
 
     fn get(&self, name: &str, expr: &Expr) -> Option<&LoxVal> {
+        println!("get: {}", LoxVal::from(self.globals.get(name).cloned()));
         match self.locals.get(&(expr as *const Expr)) {
             Some((depth, idx)) => Some(&self.scopes[self.scopes.len() - 1 - depth][*idx]),
             None => self.globals.get(name),
@@ -237,6 +239,7 @@ impl Scope {
     }
 
     fn insert(&mut self, name: &str, val: LoxVal) {
+        println!("inserting {name} in layer {}", self.scopes.len().saturating_sub(1));
         if self.scopes.is_empty() {
             self.globals.insert(String::from(name), val);
         } else {

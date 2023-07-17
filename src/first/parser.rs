@@ -339,27 +339,14 @@ fn parse_primary_expr(
 ) -> Option<Parsed<Expr>> {
     tokens
         .peeking_next(|t| {
-            *t != Token::OneChar(';') && *t != Token::OneChar('=') && *t != Token::OneChar('{')
+            *t != Token::OneChar(';')
+            && *t != Token::OneChar('=')
+            && *t != Token::OneChar('{')
+            && *t != Token::Keyword(Keyword::Fun)
         })
         .and_then(|Parsed(lc, r)| match r {
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
             Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
-            Ok(Token::Keyword(Keyword::Fun)) => None,
-            // {
-            //     if tokens.peeking_next(|t| *t == Token::OneChar('(')).is_none() {
-            //         return match tokens.next() {
-            //             Some(p) => Some(p.error_from_expected(ExpectedToken::Delimiter('('))),
-            //             None => Some(Parsed(
-            //                 (lc.0, lc.1 + 5),
-            //                 Err(anyhow!(ParseError::Expected(
-            //                     ExpectedToken::Delimiter('('),
-            //                     None
-            //                 ))),
-            //             )),
-            //         };
-            //     }
-            //     Some(parse_fun(lc, tokens))
-            // }
             Ok(t) => Some(Parsed(
                 lc,
                 match t.try_convert_literal() {
