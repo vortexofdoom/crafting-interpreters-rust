@@ -3,8 +3,6 @@ use std::{collections::HashMap, hash::Hash};
 use anyhow::{anyhow, Result};
 use by_address::ByAddress;
 
-type LoxObj = ByAddress<Box<Expr>>;
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     OneChar(char),
@@ -185,8 +183,8 @@ pub struct Class {
 
 // #[derive(Debug, Clone, PartialEq)]
 // pub struct Instance<'a> {
-//     members: &'a HashMap<String, LoxObj<'a>>,
-//     fields: HashMap<String, LoxObj<'a>>,
+//     members: &'a HashMap<String, Box<Expr><'a>>,
+//     fields: HashMap<String, Box<Expr><'a>>,
 // }
 
 impl LoxVal {
@@ -313,11 +311,11 @@ impl Precedence {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
-    Grouping(LoxObj),
-    Binary(LoxObj, Token, LoxObj),
-    Unary(Token, LoxObj),
-    Assignment(LoxObj, LoxObj),
-    Call(LoxObj, Vec<LoxObj>),
+    Grouping(Box<Expr>),
+    Binary(Box<Expr>, Token, Box<Expr>),
+    Unary(Token, Box<Expr>),
+    Assignment(Box<Expr>, Box<Expr>),
+    Call(Box<Expr>, Vec<Expr>),
     Variable(String),
     Literal(LoxVal),
 }
@@ -340,27 +338,27 @@ impl Expr {
     // Constructors to avoid Box::new() for every constructed expression
     #[inline]
     pub fn assignment(lvalue: Expr, rvalue: Expr) -> Self {
-        Self::Assignment(ByAddress(Box::new(lvalue)), ByAddress(Box::new(rvalue)))
+        Self::Assignment(Box::new(lvalue), Box::new(rvalue))
     }
 
     #[inline]
     pub fn binary(left: Expr, operator: Token, right: Expr) -> Self {
-        Self::Binary(ByAddress(Box::new(left)), operator, ByAddress(Box::new(right)))
+        Self::Binary(Box::new(left), operator, Box::new(right))
     }
 
     #[inline]
     pub fn unary(operator: Token, right: Expr) -> Self {
-        Self::Unary(operator, ByAddress(Box::new(right)))
+        Self::Unary(operator, Box::new(right))
     }
 
     #[inline]
     pub fn group(self) -> Self {
-        Self::Grouping(ByAddress(Box::new(self)))
+        Self::Grouping(Box::new(self))
     }
 
     #[inline]
     pub fn fun_call(expr: Expr, args: Vec<Expr>) -> Self {
-        Self::Call(ByAddress(Box::new(expr)), args.into_iter().map(|e| ByAddress(Box::new(e))).collect())
+        Self::Call(Box::new(expr), args)
     }
 
     #[inline]
@@ -371,44 +369,44 @@ impl Expr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
-    VarDec(String, Option<LoxObj>),
+    VarDec(String, Option<Expr>),
     FunDec(Option<String>, Box<Function>),
-    Expression(LoxObj),
-    Print(LoxObj),
+    Expression(Expr),
+    Print(Expr),
     Block(Vec<Statement>),
-    If(LoxObj, Box<Statement>, Option<Box<Statement>>),
-    While(LoxObj, Box<Statement>),
-    Return(Option<LoxObj>),
+    If(Expr, Box<Statement>, Option<Box<Statement>>),
+    While(Expr, Box<Statement>),
+    Return(Option<Expr>),
 }
 
 impl Statement {
-    pub fn var_dec(name: String, val: Option<Expr>) -> Self {
-        Self::VarDec(name, val.map(|e| ByAddress(Box::new(e))))
-    }
+    // pub fn var_dec(name: String, val: Option<Expr>) -> Self {
+    //     Self::VarDec(name, val.map(|e| Box::new(e)))
+    // }
 
     pub fn fun_dec(name: Option<String>, fun: Function) -> Self {
         Self::FunDec(name, Box::new(fun))
     }
 
-    pub fn expr_stmt(expr: Expr) -> Self {
-        Self::Expression(ByAddress(Box::new(expr)))
-    }
+    // pub fn expr_stmt(expr: Expr) -> Self {
+    //     Self::Expression(ByAddress(Box::new(expr)))
+    // }
 
-    pub fn print_stmt(expr: Expr) -> Self {
-        Self::Print(ByAddress(Box::new(expr)))
-    }
+    // pub fn print_stmt(expr: Expr) -> Self {
+    //     Self::Print(ByAddress(Box::new(expr)))
+    // }
 
     pub fn if_stmt(cond: Expr, if_exec: Statement, else_exec: Option<Statement>) -> Self {
-        Self::If(ByAddress(Box::new(cond)), Box::new(if_exec), else_exec.map(|e| Box::new(e)))
+        Self::If(cond, Box::new(if_exec), else_exec.map(|e| Box::new(e)))
     }
 
     pub fn while_stmt(cond: Expr, exec: Vec<Statement>) -> Self {
-        Self::While(ByAddress(Box::new(cond)), Box::new(Self::Block(exec)))
+        Self::While(cond, Box::new(Self::Block(exec)))
     }
 
-    pub fn return_stmt(val: Option<Expr>) -> Self {
-        Self::Return(val.map(|e| ByAddress(Box::new(e))))
-    }
+    // pub fn return_stmt(val: Option<Expr>) -> Self {
+    //     Self::Return(val.map(|e| Box::new(e)))
+    // }
 }
 
 impl std::fmt::Display for Statement {

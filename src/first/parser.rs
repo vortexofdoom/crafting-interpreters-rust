@@ -430,7 +430,7 @@ fn parse_return_stmt(
     match expr {
         Some(Parsed(_, Ok(expr))) => Parsed(
             start,
-            check_semicolon(Statement::return_stmt(Some(expr)), tokens),
+            check_semicolon(Statement::Return(Some(expr)), tokens),
         ),
         Some(Parsed(lc, Err(err))) => Parsed(lc, Err(err)),
         None => Parsed(start, check_semicolon(Statement::Return(None), tokens)),
@@ -463,7 +463,7 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
                     .unwrap_or(Err(anyhow!(ParseError::UnexpectedToken(Token::OneChar(
                         '='
                     )))))
-                    .and_then(|expr| check_semicolon(Statement::var_dec(name, Some(expr)), tokens));
+                    .and_then(|expr| check_semicolon(Statement::VarDec(name, Some(expr)), tokens));
                 if stmt_res.is_err() {
                     lc = eq_idx;
                 }
@@ -503,7 +503,7 @@ fn parse_fun(
             Some(Parsed(_, Ok(Token::OneChar(')')))) => break,
             _ => {
                 let next = tokens.next().unwrap_or(Parsed(
-                    (l, c + params.last().unwrap().len()),
+                    (l, c + params.last().unwrap().to_string().len()),
                     Err(anyhow!(ParseError::Expected(
                         ExpectedToken::Delimiter(')'),
                         None
@@ -593,7 +593,7 @@ fn parse_print_stmt(
     let start = get_line_column(tokens);
     if let Some(Parsed(lc, res)) = parse_expr(tokens) {
         match res {
-            Ok(expr) => Parsed(start, check_semicolon(Statement::print_stmt(expr), tokens)),
+            Ok(expr) => Parsed(start, check_semicolon(Statement::Print(expr), tokens)),
             Err(err) => Parsed(lc, Err(err)),
         }
     } else {
@@ -608,7 +608,7 @@ fn parse_expr_statement(
         parse_expr(tokens).expect("we're only calling this when we've already peeked a token");
 
     match res {
-        Ok(expr) => Parsed(lc, check_semicolon(Statement::expr_stmt(expr), tokens)),
+        Ok(expr) => Parsed(lc, check_semicolon(Statement::Expression(expr), tokens)),
         Err(err) => Parsed(lc, Err(err)),
     }
 }
@@ -702,7 +702,7 @@ fn parse_for_statement(
     let inc = if tokens.peeking_next(|t| *t == Token::OneChar(';')).is_none() {
         match parse_expr(tokens).expect("just checked that there was a token") {
             Parsed(lc, Err(err)) => return Parsed(lc, Err(err)),
-            Parsed(_, Ok(expr)) => Some(Statement::expr_stmt(expr)),
+            Parsed(_, Ok(expr)) => Some(Statement::Expression(expr)),
         }
     } else {
         None
