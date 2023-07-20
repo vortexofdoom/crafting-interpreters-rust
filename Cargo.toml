@@ -10,3 +10,4 @@ anyhow = "1.0.70"
 clap = { version = "4.2.1", features = ["derive"] }
 hash-chain = "0.3.2"
 itertools = "0.10.5"
+by_address = "1.1.0"

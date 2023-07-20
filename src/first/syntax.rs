@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use anyhow::{anyhow, Result};
 
@@ -150,7 +150,7 @@ pub enum LoxVal {
     Number(f64),
     Boolean(bool),
     // TODO: These can probably be references
-    Function(Box<Function>),
+    Function(Rc<Function>),
     Nil,
 }
 
@@ -198,7 +198,7 @@ impl LoxVal {
     }
 
     pub fn fun(params: Vec<String>, body: Statement) -> Self {
-        Self::Function(Box::new(Function {
+        Self::Function(Rc::new(Function {
             params,
             body: Box::new(body),
         }))
@@ -370,13 +370,27 @@ impl Expr {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
     VarDec(String, Option<Expr>),
-    FunDec(Option<String>, Expr),
+    FunDec(Option<String>, Rc<Function>),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
     If(Expr, Box<Statement>, Option<Box<Statement>>),
     While(Expr, Box<Statement>),
     Return(Option<Expr>),
+}
+
+impl Statement {
+    pub fn fun_dec(name: Option<String>, fun: Function) -> Self {
+        Self::FunDec(name, Rc::new(fun))
+    }
+
+    pub fn if_stmt(cond: Expr, exec: Statement, else_exec: Option<Statement>) -> Self {
+        Self::If(cond, Box::new(exec), else_exec.map(|s| Box::new(s)))
+    }
+
+    pub fn while_stmt(cond: Expr, exec: Statement) -> Self {
+        Self::While(cond, Box::new(exec))
+    }
 }
 
 impl std::fmt::Display for Statement {
@@ -392,7 +406,6 @@ impl std::fmt::Display for Statement {
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
             Self::FunDec(name, fun) => {
-                let Expr::Literal(LoxVal::Function(fun)) = fun else { unreachable!() };
                 if let Some(name) = name {
                     write!(f, "fun {name}(")?;
                 } else {
