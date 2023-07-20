@@ -581,7 +581,7 @@ fn parse_fun_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
         }
     };
     match parse_fun(start, tokens) {
-        Parsed(_, Ok(f)) => Parsed(start, Ok(Statement::FunDec(name, Box::new(f)))),
+        Parsed(_, Ok(f)) => Parsed(start, Ok(Statement::fun_dec(name, f))),
         Parsed(lc, Err(e)) => Parsed(lc, Err(e)),
     }
 }
@@ -626,10 +626,9 @@ fn parse_if_statement(
             .peeking_next(|t| *t == Token::Keyword(Else))
             .and_then(|_| parse_statement(tokens))
         {
-            Some(Parsed(_, Ok(else_exec))) => Parsed(
-                lc,
-                Ok(Statement::if_stmt(cond, if_exec, Some(else_exec)),
-                )),
+            Some(Parsed(_, Ok(else_exec))) => {
+                Parsed(lc, Ok(Statement::if_stmt(cond, if_exec, Some(else_exec))))
+            }
             None => Parsed(lc, Ok(Statement::if_stmt(cond, if_exec, None))),
             Some(err) => err,
         },
@@ -644,7 +643,7 @@ fn parse_while_statement(
 ) -> Parsed<Statement> {
     let lc = get_line_column(tokens);
     match (parse_expr(tokens), parse_statement(tokens)) {
-        (Some(Parsed(_, Ok(cond))), Some(Parsed(_, Ok(Statement::Block(while_exec))))) => {
+        (Some(Parsed(_, Ok(cond))), Some(Parsed(_, Ok(while_exec)))) => {
             Parsed(lc, Ok(Statement::while_stmt(cond, while_exec)))
         }
         (Some(Parsed(lc, Err(err))), _) | (_, Some(Parsed(lc, Err(err)))) => Parsed(lc, Err(err)),

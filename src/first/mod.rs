@@ -23,6 +23,7 @@ pub enum RuntimeError {
     InvalidLValue(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum FunctionType {
     Function,
 }
@@ -45,18 +46,15 @@ struct Resolver {
 }
 
 impl Resolver {
-    fn resolve<'a, 'b: 'a>(stmts: &'b [Statement], env: &mut Scope<'a>) -> Result<()> {
+    fn resolve(stmts: &[Statement], env: &mut Scope) -> Result<()> {
         let mut resolver = Self {
             scopes: vec![],
             curr_fun: None,
         };
 
         for stmt in stmts {
-            //println!("{stmt}");
             resolver.resolve_stmt(stmt, env)?;
         }
-        // println!("{:#?}", resolver.env.locals);
-        // println!("{}", resolver.env.scopes[0][0]);
         Ok(())
     }
 
@@ -70,9 +68,7 @@ impl Resolver {
 
     fn resolve_declare(&mut self, name: &str) -> Result<()> {
         // If there is no local scope, this is a global variable.
-        //println!("{name}");
         if let Some(scope) = self.scopes.last_mut() {
-            println!("declaring {name} in local scope");
             if scope
                 .0
                 .insert(String::from(name), (false, scope.1))
@@ -83,24 +79,30 @@ impl Resolver {
             scope.1 += 1;
         }
 
-        println!("{:?}", self.scopes.last());
         Ok(())
     }
 
     fn resolve_define(&mut self, name: &str) -> Result<()> {
-        // println!("{name}");
         if let Some(v) = self.scopes.last_mut().and_then(|s| s.0.get_mut(name)) {
             v.0 = true;
         }
         Ok(())
     }
 
-    fn resolve_local<'a, 'b: 'a>(&mut self, name: &'b String, env: &mut Scope<'a>) -> Result<()> {
+    fn get_name(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Variable(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn resolve_local(&mut self, expr: &Expr, env: &mut Scope) -> Result<()> {
         if !self.scopes.is_empty() {
-            let len = self.scopes.len() - 1;
-            for i in (0..len).rev() {
+            let name = Self::get_name(expr).ok_or(anyhow!("not a valid name expression"))?;
+            self.resolve_name(name)?;
+            for i in (0..self.scopes.len()).rev() {
                 if let Some((_, n)) = self.scopes[i].0.get(name) {
-                    env.locals.insert(ByAddress(name), (i, *n));
+                    env.locals.insert(expr as *const Expr as usize, (i, *n));
                     break;
                 }
             }
@@ -108,37 +110,31 @@ impl Resolver {
         Ok(())
     }
 
-    fn resolve_name<'a, 'b: 'a>(&mut self, name: &'b String, env: & mut Scope<'a>) -> Result<()> {
+    fn resolve_name(&mut self, name: &str) -> Result<()> {
         match self.scopes.last().and_then(|(m, _)| m.get(name)) {
             Some((false, _)) => Err(anyhow!(
                 "Can't read local variable {name} in its own initializer."
             )),
-            _ => self.resolve_local(&name, env),
+            _ => Ok(()),
         }
     }
 
-    fn resolve_stmt<'a, 'b: 'a>(&mut self, stmt: &'b Statement, env: &mut Scope<'a>) -> Result<()> {
-        println!("{}", self.scopes.len());
+    fn resolve_stmt(&mut self, stmt: &Statement, env: &mut Scope) -> Result<()> {
         match stmt {
-            Statement::VarDec(n, v) => {
-                self.resolve_declare(n)?;
-                if let Some(e) = v {
-                    self.resolve_expr(e, env)?;
+            Statement::VarDec(name, val) => {
+                self.resolve_declare(name)?;
+                if let Some(expr) = val {
+                    self.resolve_expr(expr, env)?;
                 }
-                self.resolve_define(n)?;
-                self.resolve_name(n, env)
+                self.resolve_define(name)
             }
             Statement::FunDec(n, f) => {
-                match n {
-                    Some(name) => {
-                        println!("fun {name}");
-                        self.resolve_declare(name)?;
-                        self.resolve_define(name)?;
-                    }
-                    _ => {}
+                if let Some(name) = n {
+                    self.resolve_declare(name)?;
+                    self.resolve_define(name)?;
                 }
 
-                self.resolve_function(f, env)
+                self.resolve_function(FunctionType::Function, f, env)
             }
             Statement::Expression(e) => self.resolve_expr(e, env),
             Statement::Print(e) => self.resolve_expr(e, env),
@@ -163,15 +159,16 @@ impl Resolver {
                 self.resolve_stmt(exec, env)
             }
             Statement::Return(e) => match e {
-                Some(e) => self.resolve_expr(e, env),
+                Some(e) => match self.curr_fun {
+                    None => Err(anyhow!("can only return from within functions")),
+                    _ => self.resolve_expr(e, env),
+                },
                 None => Ok(()),
             },
         }
     }
 
-    fn resolve_expr<'a, 'b>(&mut self, expr: &'b Expr, env: &mut Scope<'a>) -> Result<()> 
-    where 'b: 'a {
-        println!("resolving {expr} @ {}", expr as *const Expr as usize);
+    fn resolve_expr(&mut self, expr: &Expr, env: &mut Scope) -> Result<()> {
         match expr {
             Expr::Grouping(e) => self.resolve_expr(&e, env),
             Expr::Binary(l, _, r) => {
@@ -181,7 +178,7 @@ impl Resolver {
             Expr::Unary(_, r) => self.resolve_expr(&r, env),
             Expr::Assignment(n, e) => {
                 self.resolve_expr(&e, env)?;
-                self.resolve_expr(&n, env)
+                self.resolve_local(n, env)
             }
             Expr::Call(callee, args) => {
                 self.resolve_expr(&callee, env)?;
@@ -190,19 +187,24 @@ impl Resolver {
                 }
                 Ok(())
             }
-            Expr::Variable(name) => {
-                match self.scopes.last().and_then(|(m, _)| m.get(name)) {
-                    Some((false, _)) => Err(anyhow!(
-                        "Can't read local variable {name} in its own initializer."
-                    )),
-                    _ => self.resolve_local(&name, env),
-                }
-            }
+            Expr::Variable(name) => match self.scopes.last().and_then(|(m, _)| m.get(name)) {
+                Some((false, _)) => Err(anyhow!(
+                    "Can't read local variable {name} in its own initializer."
+                )),
+                _ => self.resolve_local(expr, env),
+            },
             Expr::Literal(_) => Ok(()),
         }
     }
 
-    fn resolve_function<'a, 'b: 'a>(&mut self, fun: &'b Function, env: &mut Scope<'a>) -> Result<()> {
+    fn resolve_function(
+        &mut self,
+        fun_type: FunctionType,
+        fun: &Function,
+        env: &mut Scope,
+    ) -> Result<()> {
+        let enclosing_fun = self.curr_fun;
+        self.curr_fun = Some(fun_type);
         self.open();
         for param in &fun.params {
             self.resolve_declare(param)?;
@@ -210,17 +212,18 @@ impl Resolver {
         }
         self.resolve_stmt(&fun.body, env)?;
         self.close();
+        self.curr_fun = enclosing_fun;
         Ok(())
     }
 }
 
-struct Scope<'a> {
+struct Scope {
     globals: HashMap<String, LoxVal>,
-    locals: HashMap<ByAddress<&'a String>, (usize, usize)>,
+    locals: HashMap<usize, (usize, usize)>,
     scopes: Vec<Vec<LoxVal>>,
 }
 
-impl<'a> Scope<'a> {
+impl Scope {
     fn new() -> Self {
         Self {
             globals: HashMap::new(),
@@ -229,19 +232,17 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn get(&self, name: &String) -> Option<&LoxVal> {
-        //println!("get expr: {expr} @ {} locals: {:?}", expr as *const Expr as usize, self.locals);
-        match self.locals.get(&ByAddress::from(name)) {
+    fn get(&self, name: &String, expr: &Expr) -> Option<&LoxVal> {
+        match self.locals.get(&(expr as *const Expr as usize)) {
             Some((depth, idx)) => {
-                println!("got local");
-                Some(&self.scopes[self.scopes.len() - 1 - depth][*idx])
+                Some(&self.scopes[*depth][*idx])
             },
             None => self.globals.get(name),
         }
     }
 
-    fn get_mut(&mut self, name: &String, expr: &Expr) -> Option<&mut LoxVal> {
-        match self.locals.get(&ByAddress::from(name)) {
+    fn get_mut(&mut self, name: &str, expr: &Expr) -> Option<&mut LoxVal> {
+        match self.locals.get(&(expr as *const Expr as usize)) {
             Some((depth, idx)) => {
                 let depth = self.scopes.len() - 1 - depth;
                 Some(&mut self.scopes[depth][*idx])
@@ -252,23 +253,16 @@ impl<'a> Scope<'a> {
 
     fn insert(&mut self, name: &str, val: LoxVal) {
         if self.scopes.is_empty() {
-            println!("inserting {name} in globals");
             self.globals.insert(String::from(name), val);
         } else {
-            println!(
-                "inserting {name} in layer {}",
-                self.scopes.len().saturating_sub(1)
-            );
             self.scopes
                 .last_mut()
                 .expect("just checked if globals was empty?")
                 .push(val);
-            println!("{:?}", self.scopes.last().unwrap());
         }
     }
 
-    fn resolve<'b>(&mut self, stmts: &'b [Statement]) -> Result<()> 
-    where 'b: 'a {
+    fn resolve(&mut self, stmts: &[Statement]) -> Result<()> {
         Resolver::resolve(stmts, self)
     }
 
@@ -283,13 +277,11 @@ impl<'a> Scope<'a> {
     }
 }
 
-pub struct Interpreter<'a> {
-    scope: Scope<'a>,
+pub struct Interpreter {
+    scope: Scope,
 }
 
-type LoxObj = ByAddress<Box<Expr>>;
-
-impl Interpreter<'_> {
+impl Interpreter {
     pub fn new() -> Self {
         Self {
             scope: Scope::new(),
@@ -298,14 +290,13 @@ impl Interpreter<'_> {
 
     // Probably want to return references to LoxObj
     fn evaluate(&mut self, expr: &Expr) -> Result<LoxVal> {
-        //println!("interpreting {expr} @ {}", expr.as_ref() as *const Expr as usize);
         match expr {
             Expr::Grouping(e) => self.evaluate(&e),
             Expr::Binary(l, op, r) => self.eval_binary(l, op, r),
             Expr::Unary(op, r) => self.eval_unary(&op, r),
             // Assignments evaluate to the right hand side for the purposes of print
             Expr::Assignment(_, rval) => self.evaluate(rval),
-            Expr::Variable(name) => Ok(self.scope.get(&name).cloned().unwrap_or(LoxVal::Nil)),
+            Expr::Variable(name) => Ok(self.scope.get(name, expr).cloned().unwrap_or(LoxVal::Nil)),
             Expr::Literal(val) => Ok(val.clone()),
             Expr::Call(callee, args) => self.eval_call(callee, args),
         }
@@ -324,12 +315,9 @@ impl Interpreter<'_> {
                 let val = self.evaluate(arg)?;
                 self.scope.insert(&param, val);
             }
-            let result = match self.interpret(&function.body) {
-                Ok(o) => Ok(LoxVal::from(o)),
-                Err(e) => Err(e),
-            };
+            let result = LoxVal::from(self.interpret(&function.body)?);
             self.scope.close();
-            result
+            Ok(result)
         } else {
             Err(anyhow!("{} is not a Lox callable!", *callee))
         }
@@ -443,8 +431,7 @@ impl Interpreter<'_> {
                         if let Some(entry) = self.scope.get_mut(&name, &lval) {
                             *entry = rval;
                         } else {
-                            println!("asfdsafsdfa {name}, {rval}");
-                            self.scope.insert(name, rval);
+                            return Err(anyhow!(RuntimeError::UndefinedVariable(name.clone())));
                         }
                     } else {
                         return Err(anyhow!(RuntimeError::InvalidLValue(lval.to_string())));

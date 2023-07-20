@@ -1,7 +1,6 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{collections::HashMap, rc::Rc};
 
 use anyhow::{anyhow, Result};
-use by_address::ByAddress;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
@@ -73,7 +72,7 @@ impl Token {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Keyword {
     And,
     Class,
@@ -151,7 +150,7 @@ pub enum LoxVal {
     Number(f64),
     Boolean(bool),
     // TODO: These can probably be references
-    Function(Box<Function>),
+    Function(Rc<Function>),
     Nil,
 }
 
@@ -183,8 +182,8 @@ pub struct Class {
 
 // #[derive(Debug, Clone, PartialEq)]
 // pub struct Instance<'a> {
-//     members: &'a HashMap<String, Box<Expr><'a>>,
-//     fields: HashMap<String, Box<Expr><'a>>,
+//     members: &'a HashMap<String, LoxObj<'a>>,
+//     fields: HashMap<String, LoxObj<'a>>,
 // }
 
 impl LoxVal {
@@ -196,6 +195,13 @@ impl LoxVal {
             Self::Nil => false,
             _ => true,
         }
+    }
+
+    pub fn fun(params: Vec<String>, body: Statement) -> Self {
+        Self::Function(Rc::new(Function {
+            params,
+            body: Box::new(body),
+        }))
     }
 }
 
@@ -336,32 +342,26 @@ impl std::fmt::Display for Expr {
 
 impl Expr {
     // Constructors to avoid Box::new() for every constructed expression
-    #[inline]
     pub fn assignment(lvalue: Expr, rvalue: Expr) -> Self {
         Self::Assignment(Box::new(lvalue), Box::new(rvalue))
     }
 
-    #[inline]
     pub fn binary(left: Expr, operator: Token, right: Expr) -> Self {
         Self::Binary(Box::new(left), operator, Box::new(right))
     }
 
-    #[inline]
     pub fn unary(operator: Token, right: Expr) -> Self {
         Self::Unary(operator, Box::new(right))
     }
 
-    #[inline]
     pub fn group(self) -> Self {
         Self::Grouping(Box::new(self))
     }
 
-    #[inline]
     pub fn fun_call(expr: Expr, args: Vec<Expr>) -> Self {
         Self::Call(Box::new(expr), args)
     }
 
-    #[inline]
     pub fn is_lvalue(&self) -> bool {
         matches!(self, Expr::Variable(_))
     }
@@ -370,7 +370,7 @@ impl Expr {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
     VarDec(String, Option<Expr>),
-    FunDec(Option<String>, Box<Function>),
+    FunDec(Option<String>, Rc<Function>),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
@@ -380,33 +380,17 @@ pub enum Statement {
 }
 
 impl Statement {
-    // pub fn var_dec(name: String, val: Option<Expr>) -> Self {
-    //     Self::VarDec(name, val.map(|e| Box::new(e)))
-    // }
-
     pub fn fun_dec(name: Option<String>, fun: Function) -> Self {
-        Self::FunDec(name, Box::new(fun))
+        Self::FunDec(name, Rc::new(fun))
     }
 
-    // pub fn expr_stmt(expr: Expr) -> Self {
-    //     Self::Expression(ByAddress(Box::new(expr)))
-    // }
-
-    // pub fn print_stmt(expr: Expr) -> Self {
-    //     Self::Print(ByAddress(Box::new(expr)))
-    // }
-
-    pub fn if_stmt(cond: Expr, if_exec: Statement, else_exec: Option<Statement>) -> Self {
-        Self::If(cond, Box::new(if_exec), else_exec.map(|e| Box::new(e)))
+    pub fn if_stmt(cond: Expr, exec: Statement, else_exec: Option<Statement>) -> Self {
+        Self::If(cond, Box::new(exec), else_exec.map(|s| Box::new(s)))
     }
 
-    pub fn while_stmt(cond: Expr, exec: Vec<Statement>) -> Self {
-        Self::While(cond, Box::new(Self::Block(exec)))
+    pub fn while_stmt(cond: Expr, exec: Statement) -> Self {
+        Self::While(cond, Box::new(exec))
     }
-
-    // pub fn return_stmt(val: Option<Expr>) -> Self {
-    //     Self::Return(val.map(|e| Box::new(e)))
-    // }
 }
 
 impl std::fmt::Display for Statement {
