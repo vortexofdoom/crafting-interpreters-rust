@@ -1,4 +1,7 @@
-use super::syntax::{Expr, Function, Keyword, LoxVal, Precedence, Statement, Token};
+use super::{
+    syntax::{Expr, Function, Keyword, Precedence, Statement, Token},
+    FunctionType,
+};
 use anyhow::{anyhow, Result};
 
 use itertools::{Itertools, PeekingNext};
@@ -10,16 +13,15 @@ pub enum ParseError {
     ParseNumError(String),
     InvalidToken(char),
     ClosingParen,
-    UnexpectedToken(Token),
-    MissingSemicolon,
-    StatementMissingExpr,
-    // UndefinedVariable(String),
     Expected(ExpectedToken, Option<Token>),
+    UnexpectedToken(Token),
+    StatementMissingExpr,
 }
 
 #[derive(Debug, Clone)]
 pub enum ExpectedToken {
     Identifier,
+    Semicolon,
     Delimiter(char),
 }
 
@@ -27,6 +29,7 @@ impl std::fmt::Display for ExpectedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExpectedToken::Identifier => write!(f, "identifier"),
+            ExpectedToken::Semicolon => write!(f, "semicolon"),
             ExpectedToken::Delimiter(c) => write!(f, "{c}"),
         }
     }
@@ -44,14 +47,13 @@ impl std::fmt::Display for ParseError {
             ParseError::InvalidToken(c) => write!(f, "invalid token '{c}'"),
             ParseError::ClosingParen => write!(f, "missing closing ')'"),
             ParseError::UnexpectedToken(t) => write!(f, "unexpected token {t}"),
-            ParseError::MissingSemicolon => write!(f, "missing semicolon"),
             ParseError::StatementMissingExpr => write!(f, "statement requires an expression"),
             // ParseError::UndefinedVariable(s) => write!(f, "undefined variable {s}"),
             ParseError::Expected(exp, found) => {
                 if let Some(token) = found {
                     write!(f, "expected {exp}, found {token}")
                 } else {
-                    write!(f, "expected {exp}, but reached eof")
+                    write!(f, "expected {exp}, but reached EOF")
                 }
             }
         }
@@ -254,7 +256,6 @@ fn parse_expr(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Opt
         },
         Parsed(lc, Err(err)) => Some(Parsed(lc, Err(err))),
     }
-    //; println!("{}", res.as_ref().unwrap_or(&Parsed((0, 0), Err(anyhow!("EOF"))))); res
 }
 
 fn binary_parse_loop(
@@ -307,30 +308,79 @@ fn parse_unary_expr(
 
 fn parse_call(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> Option<Parsed<Expr>> {
     let parsed = parse_primary_expr(tokens);
-    let mut args = vec![];
     match parsed {
-        Some(Parsed(lc, Ok(expr)))
-            if tokens.peeking_next(|p| p == &Token::OneChar('(')).is_some() =>
-        {
-            while tokens.peeking_next(|t| *t == Token::OneChar(')')).is_none()
-            && let Some(arg) = parse_expr(tokens) {
-                args.push(arg);
-                tokens.peeking_next(|t| *t == Token::OneChar(','));
-            }
-            if args.iter().any(|Parsed(_, r)| r.is_err()) {
-                // we return only the error but consume the whole vec
-                args.into_iter().find(|arg| arg.1.is_err())
-            } else {
-                Some(Parsed(
-                    lc,
-                    Ok(Expr::fun_call(
-                        expr,
-                        args.into_iter().map(|p| p.1.unwrap()).collect_vec(),
-                    )),
-                ))
+        Some(Parsed(lc, Ok(mut expr))) => {
+            loop {
+                match tokens.peek() {
+                    // Accessing fields and methods
+                    Some(Parsed(_, Ok(Token::OneChar('.')))) => {
+                        // advance past the '.'
+                        let (l, c) = get_line_column(tokens);
+
+                        match tokens.next() {
+                            Some(Parsed(_, Ok(Token::Identifier(name)))) => {
+                                expr = Expr::Get(Box::new(expr), name)
+                            }
+                            Some(Parsed(lc, Ok(t))) => {
+                                return Some(Parsed(
+                                    lc,
+                                    Err(anyhow!(ParseError::Expected(
+                                        ExpectedToken::Identifier,
+                                        Some(t)
+                                    ))),
+                                ))
+                            }
+                            Some(Parsed(lc, Err(e))) => return Some(Parsed(lc, Err(e))),
+                            None => {
+                                return Some(Parsed(
+                                    (l, c + 1),
+                                    Err(anyhow!(ParseError::Expected(
+                                        ExpectedToken::Identifier,
+                                        None
+                                    ))),
+                                ))
+                            }
+                        }
+                    }
+                    Some(Parsed(_, Ok(Token::OneChar('(')))) => {
+                        match finish_call(lc, expr, tokens) {
+                            Parsed(_, Ok(e)) => expr = e,
+                            err => return Some(err),
+                        }
+                    }
+                    // At this point we return it unchanged
+                    _ => return Some(Parsed(lc, Ok(expr))),
+                }
             }
         }
         _ => parsed,
+    }
+}
+
+fn finish_call(
+    lc: (usize, usize),
+    expr: Expr,
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Parsed<Expr> {
+    // advance past the '('
+    tokens.next();
+    let mut args = vec![];
+    while tokens.peeking_next(|t| *t == Token::OneChar(')')).is_none()
+    && let Some(arg) = parse_expr(tokens) {
+        args.push(arg);
+        tokens.peeking_next(|t| *t == Token::OneChar(','));
+    }
+    if args.iter().any(|Parsed(_, r)| r.is_err()) {
+        // we return only the error but consume the whole vec
+        args.into_iter().find(|arg| arg.1.is_err()).unwrap()
+    } else {
+        Parsed(
+            lc,
+            Ok(Expr::fun_call(
+                expr,
+                args.into_iter().map(|p| p.1.unwrap()).collect_vec(),
+            )),
+        )
     }
 }
 
@@ -345,6 +395,7 @@ fn parse_primary_expr(
                 && *t != Token::Keyword(Keyword::Fun)
         })
         .and_then(|Parsed(lc, r)| match r {
+            Ok(Token::Keyword(Keyword::This)) => Some(Parsed(lc, Ok(Expr::This))),
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
             Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
             Ok(t) => Some(Parsed(
@@ -404,6 +455,7 @@ pub fn parse_statement(
             Ok(token) => match token {
                 Token::OneChar('{') => Some(parse_block(tokens)),
                 Token::Keyword(Var) => Some(parse_var_dec(tokens)),
+                Token::Keyword(Class) => Some(parse_class_dec(tokens)),
                 Token::Keyword(Print) => Some(parse_print_stmt(tokens)),
                 Token::Keyword(If) => Some(parse_if_statement(tokens)),
                 Token::Keyword(While) => Some(parse_while_statement(tokens)),
@@ -439,12 +491,22 @@ fn parse_return_stmt(
 
 fn check_semicolon(
     statement: Statement,
-    tokens: &mut impl PeekingNext<Item = Parsed<Token>>,
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Result<Statement> {
-    tokens
-        .peeking_next(|t| *t == Token::OneChar(';'))
-        .map(|_| statement)
-        .ok_or(anyhow!(ParseError::MissingSemicolon))
+    match tokens.peek() {
+        Some(t) if *t == Token::OneChar(';') => {
+            tokens.next();
+            Ok(statement)
+        }
+        Some(Parsed(_, Ok(t))) => Err(anyhow!(ParseError::Expected(
+            ExpectedToken::Semicolon,
+            Some(t.clone())
+        ))),
+        _ => Err(anyhow!(ParseError::Expected(
+            ExpectedToken::Semicolon,
+            None
+        ))),
+    }
 }
 
 // TODO: Fix this monstrosity
@@ -473,7 +535,13 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
                 Parsed(lc, Err(anyhow!(ParseError::UnexpectedToken(token))))
             }
             Some(Parsed(lc, Err(err))) => Parsed(lc, Err(err)),
-            None => Parsed(lc, Err(anyhow!(ParseError::MissingSemicolon))),
+            None => Parsed(
+                lc,
+                Err(anyhow!(ParseError::Expected(
+                    ExpectedToken::Semicolon,
+                    None
+                ))),
+            ),
         }
     } else {
         Parsed(
@@ -489,8 +557,10 @@ fn parse_var_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
 fn parse_fun(
     start: (usize, usize),
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+    fun_type: FunctionType,
 ) -> Parsed<Function> {
     let mut params = vec![];
+
     while let Some(Parsed((l, c), Ok(Token::Identifier(name)))) = tokens.peeking_next(|t| {
         t.1.as_ref()
             .is_ok_and(|t| matches!(t, Token::Identifier(_)))
@@ -518,16 +588,30 @@ fn parse_fun(
             }
         }
     }
+    // advance past the ')'
     let end = get_line_column(tokens);
 
     match parse_statement(tokens) {
-        Some(Parsed(_, Ok(block @ Statement::Block(_)))) => Parsed(
-            start,
-            Ok(Function {
-                params,
-                body: Box::new(block),
-            }),
-        ),
+        Some(Parsed(_, Ok(Statement::Block(mut body)))) => {
+            // Bit of a hack but w/e
+            if fun_type == FunctionType::Initializer {
+                for stmt in body.iter_mut() {
+                    if let Statement::Return(None) = stmt {
+                        *stmt = Statement::Return(Some(Expr::This));
+                    }
+                }
+                body.push(Statement::Return(Some(Expr::This)));
+            }
+
+            Parsed(
+                start,
+                Ok(Function {
+                    fun_type,
+                    params,
+                    body: Box::new(Statement::Block(body)),
+                }),
+            )
+        }
         Some(Parsed(lc, Ok(stmt))) => Parsed(lc, Err(anyhow!("Expected block, found {stmt}"))),
         Some(Parsed(lc, Err(e))) => Parsed(lc, Err(e)),
         _ => Parsed(
@@ -580,10 +664,97 @@ fn parse_fun_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
             )
         }
     };
-    match parse_fun(start, tokens) {
+    match parse_fun(start, tokens, FunctionType::Function) {
         Parsed(_, Ok(f)) => Parsed(start, Ok(Statement::fun_dec(name, f))),
         Parsed(lc, Err(e)) => Parsed(lc, Err(e)),
     }
+}
+
+fn parse_class_dec(
+    tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+) -> Parsed<Statement> {
+    // advancing past "class"
+    let start = get_line_column(tokens);
+
+    let (name_start, name) = match tokens.next() {
+        Some(Parsed(lc, Ok(Token::Identifier(n)))) => (lc.1, n),
+        Some(Parsed(lc, Ok(t))) => {
+            return Parsed(
+                lc,
+                Err(anyhow!(ParseError::Expected(
+                    ExpectedToken::Identifier,
+                    Some(t)
+                ))),
+            )
+        }
+        Some(Parsed(lc, Err(e))) => return Parsed(lc, Err(e)),
+        None => {
+            return Parsed(
+                (start.0, start.1 + 6),
+                Err(anyhow!(ParseError::Expected(
+                    ExpectedToken::Identifier,
+                    None
+                ))),
+            )
+        }
+    };
+
+    // Expect a brace
+    // This can probably be cleaned up to map the option to a result of token but I cba rn
+    if let Some(token) = tokens.next() {
+        if token != Token::OneChar('{') {
+            match token.1 {
+                Ok(t) => {
+                    return Parsed(
+                        token.0,
+                        Err(anyhow!(ParseError::Expected(
+                            ExpectedToken::Delimiter('{'),
+                            Some(t)
+                        ))),
+                    )
+                }
+                Err(e) => return Parsed(token.0, Err(e)),
+            }
+        }
+    } else {
+        return Parsed(
+            (start.0, name_start + name.len()),
+            Err(anyhow!(ParseError::Expected(
+                ExpectedToken::Delimiter('{'),
+                None
+            ))),
+        );
+    }
+
+    // Lox classes are comprised of methods, no fields, instances can have variables and methods arbitrarily added
+    let mut methods = vec![];
+    while let Some(Parsed(lc, res)) = tokens.next() {
+        match res {
+            Ok(Token::Identifier(name)) => {
+                let fun_type = if &name == "init" {
+                    FunctionType::Initializer
+                } else {
+                    FunctionType::Method
+                };
+                // advance past '('
+                tokens.next();
+                match parse_fun(lc, tokens, fun_type) {
+                    Parsed(_, Ok(f)) => methods.push(Statement::fun_dec(Some(name), f)),
+                    Parsed(lc, Err(e)) => return Parsed(lc, Err(e)),
+                }
+            }
+            Ok(Token::OneChar('}')) => break,
+            Ok(t) => {
+                return Parsed(
+                    lc,
+                    Err(anyhow!("Expected identifier or '}}', but found {t}")),
+                )
+            }
+            Err(e) => return Parsed(lc, Err(e)),
+        }
+    }
+
+    Parsed(start, Ok(Statement::ClassDec(name, methods)))
 }
 
 fn parse_print_stmt(

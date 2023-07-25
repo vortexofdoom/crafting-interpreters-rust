@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use anyhow::{anyhow, Result};
 
@@ -149,8 +149,9 @@ pub enum LoxVal {
     String(String),
     Number(f64),
     Boolean(bool),
-    // TODO: These can probably be references
-    Function(Rc<Function>),
+    Function(Rc<Function>, Option<Rc<RefCell<Instance>>>), // Encompasses both methods and functions with an optional attached instance
+    Class(Rc<Class>),
+    Instance(Rc<RefCell<Instance>>),
     Nil,
 }
 
@@ -164,28 +165,6 @@ impl From<Option<LoxVal>> for LoxVal {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Function {
-    pub params: Vec<String>,
-    pub body: Box<Statement>,
-}
-
-// pub struct Method {
-//     pub params: Vec<String>,
-//     pub body: Vec<Statement>,
-// }
-
-#[derive(Debug, PartialEq)]
-pub struct Class {
-    members: HashMap<String, LoxVal>,
-}
-
-// #[derive(Debug, Clone, PartialEq)]
-// pub struct Instance<'a> {
-//     members: &'a HashMap<String, LoxObj<'a>>,
-//     fields: HashMap<String, LoxObj<'a>>,
-// }
-
 impl LoxVal {
     /// Lox's rules for conversion into boolean values are simple: False and Nil are "falsey", any other value (even 0) is "truthy"
     pub fn is_truthy(&self) -> bool {
@@ -197,11 +176,15 @@ impl LoxVal {
         }
     }
 
-    pub fn fun(params: Vec<String>, body: Statement) -> Self {
-        Self::Function(Rc::new(Function {
-            params,
-            body: Box::new(body),
-        }))
+    pub fn new_instance(class: Rc<Class>) -> Self {
+        Self::Instance(Rc::new(RefCell::new(Instance {
+            class: class.clone(),
+            fields: HashMap::new(),
+        })))
+    }
+
+    pub fn new_class(name: String, methods: HashMap<String, Rc<Function>>) -> Self {
+        Self::Class(Rc::new(Class { name, methods }))
     }
 }
 
@@ -212,7 +195,12 @@ impl std::fmt::Display for LoxVal {
             Self::Number(n) => write!(f, "{n}"),
             Self::Boolean(true) => write!(f, "True"),
             Self::Boolean(false) => write!(f, "False"),
-            Self::Function(_) => write!(f, "<fun>"), // TODO: maybe make it display better
+            Self::Function(_, i) => match i {
+                Some(i) => write!(f, "<method> on {}", i.borrow().class),
+                None => write!(f, "<fun>"),
+            },
+            Self::Class(c) => write!(f, "{c}"),
+            Self::Instance(i) => write!(f, "{}", i.borrow()),
             Self::Nil => write!(f, "nil"),
         }
     }
@@ -288,6 +276,79 @@ impl std::cmp::PartialOrd for LoxVal {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FunctionType {
+    Function,
+    Initializer,
+    Method,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Function {
+    pub fun_type: FunctionType,
+    pub params: Vec<String>,
+    pub body: Box<Statement>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClassType {
+    Class,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Class {
+    name: String,
+    methods: HashMap<String, Rc<Function>>,
+}
+
+impl Class {
+    pub fn get_method(&self, name: &str) -> Option<Rc<Function>> {
+        self.methods.get(name).cloned()
+    }
+}
+
+impl std::fmt::Display for Class {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Instance {
+    class: Rc<Class>,
+    fields: HashMap<String, LoxVal>,
+}
+
+impl Instance {
+    #[inline]
+    pub fn new(class: Rc<Class>) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self {
+            class: class.clone(),
+            fields: HashMap::new(),
+        }))
+    }
+
+    #[inline]
+    pub fn get_field(&self, name: &str) -> Option<LoxVal> {
+        self.fields.get(name).cloned()
+    }
+
+    #[inline]
+    pub fn get_method(&self, name: &str) -> Option<Rc<Function>> {
+        self.class.get_method(name)
+    }
+
+    pub fn insert(&mut self, name: &str, value: LoxVal) {
+        self.fields.insert(String::from(name), value);
+    }
+}
+
+impl std::fmt::Display for Instance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} instance", self.class)
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum Precedence {
     Or,
@@ -322,8 +383,10 @@ pub enum Expr {
     Unary(Token, Box<Expr>),
     Assignment(Box<Expr>, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
+    Get(Box<Expr>, String),
     Variable(String),
     Literal(LoxVal),
+    This,
 }
 
 impl std::fmt::Display for Expr {
@@ -335,7 +398,9 @@ impl std::fmt::Display for Expr {
             Expr::Variable(s) => write!(f, "{s}"),
             Expr::Assignment(l, r) => write!(f, "{l} = {r}"),
             Expr::Call(l, args) => write!(f, "{l}({})", itertools::join(args, ", ")),
+            Expr::Get(from, name) => write!(f, "{from}.{name}"),
             Expr::Unary(op, r) => write!(f, "({op}{r})"),
+            Expr::This => write!(f, "this"),
         }
     }
 }
@@ -363,7 +428,7 @@ impl Expr {
     }
 
     pub fn is_lvalue(&self) -> bool {
-        matches!(self, Expr::Variable(_))
+        matches!(self, Expr::Variable(_) | Expr::Get(_, _))
     }
 }
 
@@ -371,6 +436,7 @@ impl Expr {
 pub enum Statement {
     VarDec(String, Option<Expr>),
     FunDec(Option<String>, Rc<Function>),
+    ClassDec(String, Vec<Statement>),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
@@ -403,6 +469,7 @@ impl std::fmt::Display for Statement {
                     write!(f, "var {name}")
                 }
             }
+            Self::ClassDec(n, _) => write!(f, "class {n}"),
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
             Self::FunDec(name, fun) => {
