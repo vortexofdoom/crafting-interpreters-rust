@@ -110,6 +110,10 @@ pub fn parse(source: &str) -> Result<Vec<Statement>, Vec<Parsed<Statement>>> {
     //     println!("{t:?}");
     // }
     let stmts = scan_tokens(source).batching(parse_statement).collect_vec();
+    // for s in &stmts {
+    //     println!("{s}");
+    // }
+
     if stmts.iter().all(|p| p.1.is_ok()) {
         Ok(stmts.into_iter().map(|p| p.1.unwrap()).collect())
     } else {
@@ -384,6 +388,48 @@ fn finish_call(
     }
 }
 
+// fn parse_super(
+//     start: (usize, usize),
+//     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
+// ) -> Parsed<Expr> {
+//     if let Some(p) = tokens.next() {
+//         if p == Token::OneChar('.') {
+//             match tokens.next() {
+//                 Some(Parsed(_, Ok(Token::Identifier(name)))) => {
+//                     Parsed(start, Ok(Expr::Super(name)))
+//                 }
+//                 Some(Parsed(lc, Ok(t))) => Parsed(
+//                     lc,
+//                     Err(anyhow!(ParseError::Expected(
+//                         ExpectedToken::Identifier,
+//                         Some(t)
+//                     ))),
+//                 ),
+//                 Some(Parsed(lc, Err(e))) => Parsed(lc, Err(e)),
+//                 None => Parsed(
+//                     p.0,
+//                     Err(anyhow!(ParseError::Expected(
+//                         ExpectedToken::Identifier,
+//                         None
+//                     ))),
+//                 ),
+//             }
+//         } else {
+//             match p.1 {
+//                 Ok(t) => Parsed(p.0, Err(anyhow!(ParseError::UnexpectedToken(t)))),
+//                 Err(e) => Parsed(p.0, Err(e)),
+//             }
+//         }
+//     } else {
+//         Parsed(
+//             start,
+//             Err(anyhow!(ParseError::UnexpectedToken(Token::Keyword(
+//                 Keyword::Super
+//             )))),
+//         )
+//     }
+// }
+
 fn parse_primary_expr(
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Option<Parsed<Expr>> {
@@ -398,6 +444,7 @@ fn parse_primary_expr(
             Ok(Token::Keyword(Keyword::This)) => Some(Parsed(lc, Ok(Expr::This))),
             Ok(Token::OneChar('(')) => parse_grouping(lc, tokens),
             Ok(Token::Identifier(name)) => Some(Parsed(lc, Ok(Expr::Variable(name)))),
+            Ok(Token::Keyword(Keyword::Super)) => Some(Parsed(lc, Ok(Expr::Super))),
             Ok(t) => Some(Parsed(
                 lc,
                 match t.try_convert_literal() {
@@ -670,6 +717,7 @@ fn parse_fun_dec(tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>) -> 
     }
 }
 
+// TODO: This is getting messy
 fn parse_class_dec(
     tokens: &mut Peekable<impl Iterator<Item = Parsed<Token>>>,
 ) -> Parsed<Statement> {
@@ -677,7 +725,7 @@ fn parse_class_dec(
     let start = get_line_column(tokens);
 
     let (name_start, name) = match tokens.next() {
-        Some(Parsed(lc, Ok(Token::Identifier(n)))) => (lc.1, n),
+        Some(Parsed(lc, Ok(Token::Identifier(n)))) => (lc, n),
         Some(Parsed(lc, Ok(t))) => {
             return Parsed(
                 lc,
@@ -701,32 +749,58 @@ fn parse_class_dec(
 
     // Expect a brace
     // This can probably be cleaned up to map the option to a result of token but I cba rn
-    if let Some(token) = tokens.next() {
-        if token != Token::OneChar('{') {
-            match token.1 {
-                Ok(t) => {
-                    return Parsed(
-                        token.0,
-                        Err(anyhow!(ParseError::Expected(
-                            ExpectedToken::Delimiter('{'),
-                            Some(t)
-                        ))),
-                    )
+    let super_class = match tokens.next() {
+        Some(token) if token == Token::OneChar('<') => match tokens.next() {
+            Some(Parsed(lc, Ok(Token::Identifier(name)))) => {
+                match tokens.next() {
+                    Some(t) if t == Token::OneChar('{') => {}
+                    Some(t) => return t.error_from_expected(ExpectedToken::Delimiter('{')),
+                    None => {
+                        return Parsed(
+                            (lc.0, lc.1 + name.len()),
+                            Err(anyhow!(ParseError::Expected(
+                                ExpectedToken::Delimiter('{'),
+                                None
+                            ))),
+                        )
+                    }
                 }
-                Err(e) => return Parsed(token.0, Err(e)),
+                Some(Expr::Variable(name))
             }
+            Some(Parsed(lc, Ok(t))) => {
+                return Parsed(
+                    lc,
+                    Err(anyhow!(ParseError::Expected(
+                        ExpectedToken::Identifier,
+                        Some(t)
+                    ))),
+                )
+            }
+            Some(Parsed(lc, Err(e))) => return Parsed(lc, Err(e)),
+            None => {
+                return Parsed(
+                    token.0,
+                    Err(anyhow!(ParseError::Expected(
+                        ExpectedToken::Identifier,
+                        None
+                    ))),
+                )
+            }
+        },
+        Some(token) if token == Token::OneChar('{') => None,
+        Some(Parsed(lc, Ok(t))) => {
+            return Parsed(lc, Err(anyhow!("Expected '{{' or '<', but found {t}.")))
         }
-    } else {
-        return Parsed(
-            (start.0, name_start + name.len()),
-            Err(anyhow!(ParseError::Expected(
-                ExpectedToken::Delimiter('{'),
-                None
-            ))),
-        );
-    }
+        Some(Parsed(lc, Err(e))) => return Parsed(lc, Err(e)),
+        None => {
+            return Parsed(
+                start,
+                Err(anyhow!("Expected '{{' or '<', but found nothing.")),
+            )
+        }
+    };
 
-    // Lox classes are comprised of methods, no fields, instances can have variables and methods arbitrarily added
+    // Lox classes are comprised of methods, no fields, instances can have variables arbitrarily added
     let mut methods = vec![];
     while let Some(Parsed(lc, res)) = tokens.next() {
         match res {
@@ -754,7 +828,7 @@ fn parse_class_dec(
         }
     }
 
-    Parsed(start, Ok(Statement::ClassDec(name, methods)))
+    Parsed(start, Ok(Statement::ClassDec(name, super_class, methods)))
 }
 
 fn parse_print_stmt(

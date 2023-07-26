@@ -176,15 +176,16 @@ impl LoxVal {
         }
     }
 
-    pub fn new_instance(class: Rc<Class>) -> Self {
-        Self::Instance(Rc::new(RefCell::new(Instance {
-            class: class.clone(),
-            fields: HashMap::new(),
-        })))
-    }
-
-    pub fn new_class(name: String, methods: HashMap<String, Rc<Function>>) -> Self {
-        Self::Class(Rc::new(Class { name, methods }))
+    pub fn new_class(
+        name: String,
+        super_class: Option<Rc<Class>>,
+        methods: HashMap<String, Rc<Function>>,
+    ) -> Self {
+        Self::Class(Rc::new(Class {
+            name,
+            super_class,
+            methods,
+        }))
     }
 }
 
@@ -293,17 +294,27 @@ pub struct Function {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClassType {
     Class,
+    SubClass,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Class {
     name: String,
+    super_class: Option<Rc<Class>>,
     methods: HashMap<String, Rc<Function>>,
 }
 
 impl Class {
     pub fn get_method(&self, name: &str) -> Option<Rc<Function>> {
-        self.methods.get(name).cloned()
+        match self.methods.get(name) {
+            Some(method) => Some(method.clone()),
+            None => self.super_class.as_ref().and_then(|sc| sc.get_method(name)),
+        }
+    }
+
+    #[inline]
+    pub fn get_super(&self) -> Option<Rc<Class>> {
+        self.super_class.clone()
     }
 }
 
@@ -336,6 +347,10 @@ impl Instance {
     #[inline]
     pub fn get_method(&self, name: &str) -> Option<Rc<Function>> {
         self.class.get_method(name)
+    }
+
+    pub fn get_super(&self) -> Option<Rc<Class>> {
+        self.class.get_super()
     }
 
     pub fn insert(&mut self, name: &str, value: LoxVal) {
@@ -387,6 +402,7 @@ pub enum Expr {
     Variable(String),
     Literal(LoxVal),
     This,
+    Super,
 }
 
 impl std::fmt::Display for Expr {
@@ -401,6 +417,7 @@ impl std::fmt::Display for Expr {
             Expr::Get(from, name) => write!(f, "{from}.{name}"),
             Expr::Unary(op, r) => write!(f, "({op}{r})"),
             Expr::This => write!(f, "this"),
+            Expr::Super => write!(f, "super"),
         }
     }
 }
@@ -436,7 +453,7 @@ impl Expr {
 pub enum Statement {
     VarDec(String, Option<Expr>),
     FunDec(Option<String>, Rc<Function>),
-    ClassDec(String, Vec<Statement>),
+    ClassDec(String, Option<Expr>, Vec<Statement>),
     Expression(Expr),
     Print(Expr),
     Block(Vec<Statement>),
@@ -469,7 +486,13 @@ impl std::fmt::Display for Statement {
                     write!(f, "var {name}")
                 }
             }
-            Self::ClassDec(n, _) => write!(f, "class {n}"),
+            Self::ClassDec(n, s, _) => {
+                if let Some(s) = s {
+                    write!(f, "class {n} < {s}")
+                } else {
+                    write!(f, "class {n}")
+                }
+            }
             Self::Expression(e) => write!(f, "Expr: {e}"),
             Self::Print(e) => write!(f, "Print: {e}"),
             Self::FunDec(name, fun) => {

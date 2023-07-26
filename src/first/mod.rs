@@ -96,6 +96,7 @@ impl Resolver {
         match expr {
             Expr::Variable(name) => Some(name),
             Expr::This => Some("this"),
+            Expr::Super => Some("super"),
             _ => None,
         }
     }
@@ -103,6 +104,7 @@ impl Resolver {
     fn resolve_local(&mut self, expr: &Expr, env: &mut Scope) -> Result<()> {
         if !self.scopes.is_empty() {
             let name = Self::get_name(expr).ok_or(anyhow!("not a valid name expression"))?;
+            //println!("{name}");
             self.resolve_name(name)?;
             for i in (0..self.scopes.len()).rev() {
                 if let Some((_, n)) = self.scopes[i].0.get(name) {
@@ -141,7 +143,7 @@ impl Resolver {
 
                 self.resolve_function(FunctionType::Function, f, env)
             }
-            Statement::ClassDec(name, methods) => {
+            Statement::ClassDec(name, super_class, methods) => {
                 let enclosing_class = self.curr_class;
                 self.curr_class = Some(ClassType::Class);
 
@@ -149,6 +151,19 @@ impl Resolver {
                 self.resolve_define(name)?;
 
                 self.open();
+                if let Some(Expr::Variable(n)) = super_class {
+                    if n == name {
+                        return Err(anyhow!("A class can't inherit from itself."));
+                    }
+                    self.curr_class = Some(ClassType::SubClass);
+                    //println!("{:?}", super_class);
+                    self.resolve_expr(super_class.as_ref().unwrap(), env)?;
+                    let scope = self.scopes.last_mut().expect("just pushed a new scope");
+                    scope.0.insert(String::from("super"), (true, scope.1));
+                    scope.1 += 1;
+                    self.open();
+                }
+
                 let scope = self.scopes.last_mut().expect("just pushed a new scope");
                 scope.0.insert(String::from("this"), (true, scope.1));
                 scope.1 += 1;
@@ -170,7 +185,9 @@ impl Resolver {
                             ))
                         }
                     }
-                    self.resolve_stmt(method, env)?;
+                }
+                if super_class.is_some() {
+                    self.close();
                 }
                 self.close();
                 self.curr_class = enclosing_class;
@@ -212,6 +229,7 @@ impl Resolver {
     }
 
     fn resolve_expr(&mut self, expr: &Expr, env: &mut Scope) -> Result<()> {
+        //println!("{expr:?}");
         match expr {
             Expr::Grouping(e) => self.resolve_expr(&e, env),
             Expr::Binary(l, _, r) => {
@@ -244,6 +262,8 @@ impl Resolver {
 
                 self.resolve_local(expr, env)
             }
+            // NOT WHAT YOU NEED TO DO
+            Expr::Super => self.resolve_local(expr, env),
             Expr::Literal(_) => Ok(()),
         }
     }
@@ -287,7 +307,9 @@ impl Scope {
     fn get(&self, name: &str, expr: &Expr) -> Option<&LoxVal> {
         //println!("get: {name}, {expr}");
         match self.locals.get(&(expr as *const Expr as usize)) {
-            Some((depth, idx)) => Some(&self.scopes[*depth][*idx]),
+            Some((depth, idx)) => {
+                //println!("{}", &self.scopes[*depth][*idx]); 
+                Some(&self.scopes[*depth][*idx])},
             None => self.globals.get(name),
         }
     }
@@ -356,10 +378,12 @@ impl Interpreter {
             Expr::Literal(val) => Ok(val.clone()),
             Expr::Call(callee, args) => self.eval_call(callee, args),
             Expr::This => Ok(LoxVal::from(self.scope.get("this", expr).cloned())),
+            Expr::Super => Ok(LoxVal::from(self.scope.get("super", expr).cloned())),
         }
     }
 
     fn eval_get(&mut self, from: &Expr, name: &str) -> Result<LoxVal> {
+        //println!("get {from}");
         match self.evaluate(from)? {
             LoxVal::Instance(i) => {
                 match i.borrow().get_field(name) {
@@ -374,10 +398,8 @@ impl Interpreter {
                     }
                 }
             }
-            e => {
-                println!("{e}");
-                Err(anyhow!(RuntimeError::InvalidGet))
-            }
+            LoxVal::Class(c) => c.get_method(name).map(|f| LoxVal::Function(f.clone(), None)).ok_or(anyhow!(RuntimeError::UndefinedVariable(String::from(name)))),
+            _ => Err(anyhow!(RuntimeError::InvalidGet)),
         }
     }
 
@@ -388,6 +410,10 @@ impl Interpreter {
         instance: Option<Rc<RefCell<Instance>>>,
     ) -> Result<LoxVal> {
         if let Some(i) = &instance {
+            if let Some(s) = i.borrow().get_super() {
+                self.scope.open();
+                self.scope.insert("super", LoxVal::Class(s));
+            }
             self.scope.open();
             self.scope.insert("this", LoxVal::Instance(i.clone()));
         }
@@ -418,7 +444,10 @@ impl Interpreter {
         self.scope.close();
 
         // If calling a method, we need to close off the scope containing the binding for "this"
-        if instance.is_some() {
+        if let Some(i) = &instance {
+            if i.borrow().get_super().is_some() {
+                self.scope.close();
+            }
             self.scope.close();
         }
 
@@ -599,7 +628,22 @@ impl Interpreter {
                     return Ok(Some(LoxVal::Function(fun.clone(), None)));
                 }
             }
-            Statement::ClassDec(name, methods) => {
+            Statement::ClassDec(name, super_class, methods) => {
+                //println!("{stmt}");
+                let sc = match super_class {
+                    Some(var) => {
+                        match self.evaluate(var)? {
+                        LoxVal::Class(c) => {
+                            //println!("{c}");
+                            self.scope.open();
+                            self.scope.insert("super", LoxVal::Class(c.clone()));
+                            //println!("{:?}", self.scope.scopes);
+                            Some(c)
+                        },
+                        val => return Err(anyhow!("{val} is not a Lox class!")),
+                    }},
+                    None => None,
+                };
                 let mut map = HashMap::new();
                 for method in methods {
                     match method {
@@ -609,7 +653,10 @@ impl Interpreter {
                         _ => return Err(anyhow!("Can only have named methods in classes, found {method}")),
                     }
                 }
-                self.scope.insert(name, LoxVal::new_class(name.clone(), map));
+                if super_class.is_some() {
+                    self.scope.close();
+                }
+                self.scope.insert(name, LoxVal::new_class(name.clone(), sc, map));
             },
             Statement::Return(expr) => {
                 if let Some(expr) = expr {
