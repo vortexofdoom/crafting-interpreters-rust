@@ -438,6 +438,6 @@ impl<'a> LineScanner<'a> {
             self.advance();
         }
 
-        Token::from_str(&self.line[start..self.curr_byte - 1])
+        Token::from_str(&self.line[start..self.curr_byte])
     }
 }

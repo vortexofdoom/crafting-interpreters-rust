@@ -183,7 +183,7 @@ impl Vm {
                 OpCode::Multiply => bin_op!(*),
                 OpCode::Divide => bin_op!(/),
                 OpCode::Not => {
-                    let value = (!self.pop())?;
+                    let value = !self.pop();
                     self.push(value);
                 }
                 OpCode::Negate => {

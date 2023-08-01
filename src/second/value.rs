@@ -85,12 +85,12 @@ impl std::ops::Neg for Value {
 }
 
 impl std::ops::Not for Value {
-    type Output = Result<Self>;
+    type Output = Self;
 
     fn not(self) -> Self::Output {
         match self {
-            Self::Bool(b) => Ok(Self::Bool(!b)),
-            _ => Err(anyhow!("cannot negate {self}")),
+            Self::Bool(b) => Self::Bool(!b),
+            _ => Self::Bool(!self.is_truthy()),
         }
     }
 }
