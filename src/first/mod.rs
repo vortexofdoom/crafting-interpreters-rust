@@ -308,8 +308,9 @@ impl Scope {
         //println!("get: {name}, {expr}");
         match self.locals.get(&(expr as *const Expr as usize)) {
             Some((depth, idx)) => {
-                //println!("{}", &self.scopes[*depth][*idx]); 
-                Some(&self.scopes[*depth][*idx])},
+                //println!("{}", &self.scopes[*depth][*idx]);
+                Some(&self.scopes[*depth][*idx])
+            }
             None => self.globals.get(name),
         }
     }
@@ -398,7 +399,10 @@ impl Interpreter {
                     }
                 }
             }
-            LoxVal::Class(c) => c.get_method(name).map(|f| LoxVal::Function(f.clone(), None)).ok_or(anyhow!(RuntimeError::UndefinedVariable(String::from(name)))),
+            LoxVal::Class(c) => c
+                .get_method(name)
+                .map(|f| LoxVal::Function(f.clone(), None))
+                .ok_or(anyhow!(RuntimeError::UndefinedVariable(String::from(name)))),
             _ => Err(anyhow!(RuntimeError::InvalidGet)),
         }
     }
@@ -680,13 +684,6 @@ impl Interpreter {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Parser)]
-pub struct LoxArgs {
-    /// Path to complete lox file.
-    /// if empty opens a lox prompt.
-    pub path: Option<String>,
 }
 
 pub fn run_file(path: &str) -> Result<()> {

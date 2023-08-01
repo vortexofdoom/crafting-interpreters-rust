@@ -63,18 +63,6 @@ impl std::fmt::Display for ParseError {
 #[derive(Debug)]
 pub struct Parsed<T>(pub (usize, usize), pub Result<T>);
 
-impl Parsed<Token> {
-    fn error_from_expected<U>(self, expected: ExpectedToken) -> Parsed<U> {
-        match self.1 {
-            Ok(t) => Parsed(
-                self.0,
-                Err(anyhow!(ParseError::Expected(expected, Some(t)))),
-            ),
-            Err(e) => Parsed(self.0, Err(e)),
-        }
-    }
-}
-
 impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.1 {
@@ -92,6 +80,18 @@ where
         match self.1.as_ref() {
             Ok(t) => t == other,
             _ => false,
+        }
+    }
+}
+
+impl Parsed<Token> {
+    fn error_from_expected<U>(self, expected: ExpectedToken) -> Parsed<U> {
+        match self.1 {
+            Ok(t) => Parsed(
+                self.0,
+                Err(anyhow!(ParseError::Expected(expected, Some(t)))),
+            ),
+            Err(e) => Parsed(self.0, Err(e)),
         }
     }
 }

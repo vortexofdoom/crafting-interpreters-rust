@@ -1,15 +1,34 @@
 #![feature(let_chains)]
 mod first;
+mod second;
+
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+};
 
 use anyhow::Result;
 use clap::Parser;
-use first::{run_file, run_prompt, LoxArgs};
+use second::{
+    chunk::{Chunk, OpCode},
+    scanner::scan,
+    InterpretError, Vm,
+};
+
+#[derive(Debug, Parser)]
+pub struct LoxArgs {
+    /// Path to complete lox file.
+    /// if empty opens a lox prompt.
+    pub path: Option<String>,
+}
 
 fn main() -> Result<()> {
     let args = LoxArgs::parse();
+    let mut vm = Vm::new();
     if let Some(p) = args.path {
-        run_file(&p)
+        vm.run_file(&p)
     } else {
-        run_prompt()
+        vm.run_prompt()
     }
 }
