@@ -8,7 +8,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
-    ptr::NonNull,
+    ptr::NonNull, collections::HashMap,
 };
 
 use anyhow::{anyhow, Result};
@@ -17,7 +17,7 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    value::{Obj, Value},
+    value::{Obj, Value, ObjType, ObjString},
 };
 
 const STACK_MAX: usize = 256;
@@ -40,9 +40,10 @@ impl std::fmt::Display for InterpretError {
 pub struct Vm {
     chunk: Option<Chunk>,
     stack: [Value; STACK_MAX],
-    objects: Option<NonNull<Obj>>,
     sp: usize,
     ip: usize,
+    objects: Option<NonNull<Obj>>,
+    globals: HashMap<Value, Value>,
 }
 
 impl Vm {
@@ -57,9 +58,10 @@ impl Vm {
         Self {
             chunk: None,
             stack: [Value::Nil; STACK_MAX],
-            objects: None,
             sp: 0,
             ip: 0,
+            objects: None,
+            globals: HashMap::new(),
         }
     }
 
@@ -88,6 +90,30 @@ impl Vm {
         self.sp -= 1;
         //println!("popping {}, sp: {}", self.stack[self.sp], self.sp);
         self.stack[self.sp]
+    }
+
+    #[inline]
+    fn peek(&self, dist: usize) -> Value {
+        self.stack[self.sp - 1 - dist]
+    }
+
+    pub fn free_objects(&mut self) {
+        while let Some(mut obj) = self.objects {
+            unsafe {
+                self.objects = obj.as_mut().next.take();
+                Vm::free_object(obj);
+            }
+        }
+    }
+
+    unsafe fn free_object(obj: NonNull<Obj>) {
+        println!("{}", Value::Obj(obj));
+        let ptr = match obj.as_ref().kind {
+            ObjType::String => obj.as_ptr(),
+            ObjType::Function => todo!()
+        };
+
+        drop(Box::from_raw(ptr));
     }
 
     #[inline]
@@ -134,11 +160,12 @@ impl Vm {
         loop {
             print!("> ");
             std::io::stdout().flush().expect("new prompt failed");
+            let start = input.len();
             if std::io::stdin().read_line(&mut input).is_ok() {
                 if input == "\n" {
                     break;
                 } else {
-                    if let Err(e) = self.interpret(&input) {
+                    if let Err(e) = self.interpret(&input[start..]) {
                         println!("{e}");
                     }
                     input.clear();
@@ -186,6 +213,21 @@ impl Vm {
                 OpCode::Nil => self.push(Value::Nil),
                 OpCode::True => self.push(Value::Bool(true)),
                 OpCode::False => self.push(Value::Bool(false)),
+                OpCode::Pop => { self.pop(); },
+                OpCode::GetGlobal => {
+                    let name = self.read_constant();
+                    if let Some(value) = self.globals.get(&name) {
+                        self.push(*value);
+                    } else {
+                        return Err(anyhow!(InterpretError::Runtime));
+                    }
+                }
+                OpCode::DefineGlobal => {
+                        let name = self.read_constant();
+                        let value = self.peek(0);
+                        self.globals.insert(name, value);
+                        self.pop();
+                }
                 OpCode::Equal => compare!(==),
                 OpCode::Greater => compare!(>),
                 OpCode::GreaterEqual => compare!(>=),
@@ -203,10 +245,10 @@ impl Vm {
                     let value = (-self.pop())?;
                     self.push(value);
                 }
-                OpCode::Return => {
+                OpCode::Print => {
                     println!("{}", self.pop());
-                    break;
                 }
+                OpCode::Return => break,
             }
         }
         Ok(())
@@ -219,7 +261,9 @@ mod tests {
     #[test]
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
-        let source = "5 >= 6\n\"hello\"\n\"hi I'm dkflajf\"";
-        vm.interpret(source)
+        let source = "5 >= 6\n\"hello\"\n\"hi I'm dkflajf\"\n\"more strings here\"";
+        vm.interpret(source)?;
+        vm.free_objects();
+        Ok(())
     }
 }

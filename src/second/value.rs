@@ -1,4 +1,4 @@
-use std::ptr::NonNull;
+use std::{ptr::NonNull, hash::Hash, ops::Deref};
 
 use anyhow::{anyhow, Result};
 
@@ -10,15 +10,24 @@ pub enum Value {
     Nil,
 }
 
-impl Value {
-    pub fn obj_type(&self) -> Option<&Obj> {
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            // Safety: ObjType will always be non-null, since it is derived ONLY from *const Obj items
-            Self::Obj(o) => unsafe { Some(o.as_ref()) },
-            _ => None,
+            Value::Bool(b) => b.hash(state),
+            Value::Number(n) => n.to_bits().hash(state),
+            Value::Obj(o) => {
+                unsafe {
+                    o.cast::<ObjString>().as_ref().hash(state);
+                }
+            }
+            Value::Nil => (),
         }
     }
+}
 
+impl Value {
     pub fn new_string(string: String) -> Self {
         let obj = ObjString::new(string);
         let ptr = NonNull::new(Box::into_raw(Box::new(obj)))
@@ -29,15 +38,8 @@ impl Value {
 }
 
 pub trait IsObj {
-    fn as_type_ptr(&self) -> *const Obj {
-        self as *const Self as *const Obj
-    }
-
-    fn ptr_from_type(ptr: NonNull<Obj>) -> NonNull<Self>
-    where
-        Self: Sized,
-    {
-        ptr.cast()
+    fn as_obj_ptr(&self) -> NonNull<Obj> {
+        NonNull::from(self).cast()
     }
 }
 
@@ -48,9 +50,10 @@ pub enum ObjType {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone)]
 pub struct Obj {
-    kind: ObjType,
-    next: Option<NonNull<Obj>>,
+    pub kind: ObjType,
+    pub next: Option<NonNull<Obj>>,
 }
 
 impl Obj {
@@ -66,12 +69,30 @@ impl Obj {
     }
 }
 
+/// The base type for Lox Strings
+/// Inlining length and turning it into a dynamically sized type could increase performance
+/// TODO: Figure out how to format raw strs/byte arrays
 #[repr(C)]
+#[derive(Debug, Clone)]
 pub struct ObjString {
     obj: Obj,
     // This is an extra word in heap memory vs the book's representation,
     // but it comes with ergonomics (and potential optimization later)
     string: String,
+}
+
+impl PartialEq for ObjString {
+    fn eq(&self, other: &Self) -> bool {
+        self.string == other.string
+    }
+}
+
+impl Eq for ObjString {}
+
+impl Hash for ObjString {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.string.hash(state);
+    }
 }
 
 impl IsObj for ObjString {}
@@ -82,6 +103,14 @@ impl ObjString {
             obj: Obj::string(),
             string,
         }
+    }
+}
+
+impl Deref for ObjString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.string
     }
 }
 
@@ -110,7 +139,7 @@ impl std::fmt::Display for Value {
                 // SAFETY: The ObjType enum's entire usage is to validate these pointer casts.
                 // a *const ObjType::String will only ever be generated from a *const ObjString
                 match o.as_ref().kind {
-                    ObjType::String => write!(f, "{}", ObjString::ptr_from_type(*o).as_ref()),
+                    ObjType::String => write!(f, "{}", o.cast::<ObjString>().as_ref()),
                     ObjType::Function => todo!(),
                     _ => unreachable!(),
                 }

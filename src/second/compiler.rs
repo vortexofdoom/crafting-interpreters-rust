@@ -170,16 +170,25 @@ struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
 
 // Can probably do everything with peek() instead of keeping the previous token, but we'll find out
 impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
-    fn consume(&mut self, token: Token<'_>) -> Result<()> {
+    fn consume_token(&mut self, token: TokenType) -> Result<()> {
         match self.tokens.peek() {
             Some(Parsed(_, Ok(t))) if *t == token => self.advance(),
             _ => Err(anyhow!("expected {token}")),
         }
     }
 
-    fn current(&mut self) -> Option<Result<Token>> {
+    fn match_token(&mut self, token: TokenType) -> Result<bool> {
+        if self.tokens.peek().is_some_and(|t| *t == token) {
+            self.advance()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn current(&mut self) -> Option<Result<(usize, Token)>> {
         match self.tokens.peek() {
-            Some(Parsed(_, Ok(t))) => Some(Ok(*t)),
+            Some(Parsed((l, _), Ok(t))) => Some(Ok((*l, *t))),
             Some(Parsed((l, c), Err(e))) => Some(Err(anyhow!("Error at {l}, {c}: {e}"))),
             None => None,
         }
@@ -191,10 +200,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             .1
     }
 
-    fn emit_byte(&mut self, byte: impl Into<u8>) {
-        self.chunk
-            .write(byte, self.prev.expect("only emit bytes from a token").0);
-    }
+    // fn emit_byte(&mut self, byte: impl Into<u8>, line) {
+    //     self.chunk
+    //         .write(byte, self.prev.expect("only emit bytes from a token").0);
+    // }
 
     fn advance(&mut self) -> Result<()> {
         let parsed = self.tokens.next();
@@ -210,6 +219,81 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 Ok(())
             }
         }
+    }
+
+    fn synchronize(&mut self) {
+        while let Some(Parsed(_, Ok(t))) = self.tokens.peek() {
+            if self.prev.unwrap().1 == Token::Semicolon {
+                return;
+            }
+            match t {
+                Token::Class 
+                | Token::Fun
+                | Token::For
+                | Token::If
+                | Token::Print
+                | Token::Return
+                | Token::Var
+                | Token::While => return,
+                _ => {let _ = self.advance();},
+            }
+        }
+    }
+
+    fn declaration(&mut self) -> Result<()> {
+        if self.match_token(TokenType::Var)? {
+            self.var_dec()
+        } else {
+            self.statement()
+        }
+    }
+
+    fn var_dec(&mut self) -> Result<()> {
+        let (global, line) = self.parse_variable()?;
+        if self.match_token(TokenType::Equal)? {
+            self.expression()?;
+        } else {
+            self.chunk.write(OpCode::Nil, line);
+        }
+        self.consume_token(TokenType::Semicolon)?;
+        self.chunk.write(OpCode::DefineGlobal, line);
+        self.chunk.write(global, line);
+        Ok(())
+    }
+
+    fn parse_variable(&mut self) -> Result<(u8, usize)> {
+        self.consume_token(TokenType::Identifier)?;
+        let Some((l, Token::Identifier(s))) = self.prev else { unreachable!() };
+        Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
+    }
+
+    fn named_variable(name: &str) -> Result<()> {
+        
+        Ok(())
+    }
+
+    fn statement(&mut self) -> Result<()> {
+        let (line, token) = self.current().unwrap()?;
+        match token {
+            Token::Class => todo!(),
+            Token::Fun => todo!(),
+            Token::For => todo!(),
+            Token::If => todo!(),
+            Token::Print => {
+                self.advance()?;
+                self.expression()?;
+                self.consume_token(TokenType::Semicolon)?;
+                self.chunk.write(OpCode::Print, line);
+            },
+            Token::Return => todo!(),
+            Token::While => todo!(),
+            _ => {
+                self.expression()?;
+                self.consume_token(TokenType::Semicolon)?;
+                self.chunk.write(OpCode::Pop, line);
+            }
+        }
+        Ok(())
     }
 
     fn string(&mut self) -> Result<()> {
@@ -291,20 +375,21 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn grouping(&mut self) -> Result<()> {
         self.expression()?;
-        self.consume(Token::RightParen)?;
+        self.consume_token(TokenType::RightParen)?;
         Ok(())
     }
 
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
         self.advance()?;
         if let Some((_, token)) = self.prev {
+            println!("{token}");
             match ParseRule::<T>::prefix(token) {
                 Some(prefix_rule) => prefix_rule(self)?,
                 None => return Err(anyhow!("expect expression.")),
             }
 
             while let Some(res) = self.current()
-            && ParseRule::<T>::precedence(res?) >= precedence {
+            && ParseRule::<T>::precedence(res?.1) >= precedence {
                 match self.current() {
                     Some(Ok(_)) => {
                         self.advance()?;
@@ -323,13 +408,22 @@ pub fn compile(source: &str) -> Result<Chunk> {
     for token in scan(source) {
         println!("Token: {token}");
     }
+
     let mut parser = Parser {
         chunk: Chunk::new(),
         prev: None,
         tokens: scan(source),
     };
 
-    parser.expression()?;
+    loop {
+        if let Err(e) = parser.declaration() {
+            parser.synchronize();
+            println!("{e}");
+        }
+        if parser.tokens.peek().is_none() {
+            break;
+        }
+    }
     parser.chunk.write(OpCode::Return, 0);
     Ok(parser.chunk)
 }

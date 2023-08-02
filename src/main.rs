@@ -1,4 +1,6 @@
 #![feature(let_chains)]
+#![feature(box_into_inner)]
+#![allow(non_upper_case_globals, unused)]
 mod first;
 mod second;
 
@@ -27,8 +29,10 @@ fn main() -> Result<()> {
     let args = LoxArgs::parse();
     let mut vm = Vm::new();
     if let Some(p) = args.path {
-        vm.run_file(&p)
+        vm.run_file(&p)?;
     } else {
-        vm.run_prompt()
+        vm.run_prompt()?;
     }
+    vm.free_objects();
+    Ok(())
 }

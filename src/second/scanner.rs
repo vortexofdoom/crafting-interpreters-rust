@@ -148,10 +148,64 @@ impl From<Token<'_>> for TokenType {
     }
 }
 
+impl std::fmt::Display for TokenType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TokenType::LeftParen => "(",
+            TokenType::RightParen => ")",
+            TokenType::LeftBrace => "{{",
+            TokenType::RightBrace => "}}",
+            TokenType::Comma => ",",
+            TokenType::Dot => ".",
+            TokenType::Minus => "-",
+            TokenType::Plus => "+",
+            TokenType::Semicolon => ";",
+            TokenType::Slash => "/",
+            TokenType::Star => "*",
+            TokenType::Bang => "!",
+            TokenType::BangEqual => "!=",
+            TokenType::Equal => "=",
+            TokenType::EqualEqual => "==",
+            TokenType::Greater => ">",
+            TokenType::GreaterEqual => ">=",
+            TokenType::Less => "<",
+            TokenType::LessEqual => "<=",
+            TokenType::Identifier => "identifier",
+            TokenType::String => "string",
+            TokenType::Number => "number",
+            TokenType::And => "and",
+            TokenType::Class => "class",
+            TokenType::Else => "else",
+            TokenType::False => "false",
+            TokenType::Fun => "fun",
+            TokenType::For => "for",
+            TokenType::If => "if",
+            TokenType::Nil => "nil",
+            TokenType::Or => "or",
+            TokenType::Print => "print",
+            TokenType::Return => "return",
+            TokenType::Super => "super",
+            TokenType::This => "this",
+            TokenType::True => "true",
+            TokenType::Var => "var",
+            TokenType::While => "while",
+        };
+
+        write!(f, "{s}")
+    }
+}
+
 impl PartialEq<Token<'_>> for Token<'_> {
     fn eq(&self, other: &Token) -> bool {
         core::mem::discriminant(self) == core::mem::discriminant(other)
     }
+}
+
+impl PartialEq<TokenType> for Token<'_> {
+    fn eq(&self, other: &TokenType) -> bool {
+        let token_type = TokenType::from(*self);
+        token_type == *other
+    }    
 }
 
 impl<'a> Token<'a> {
@@ -279,11 +333,11 @@ impl<T: std::fmt::Display> std::fmt::Display for Parsed<T> {
     }
 }
 
-impl<T> PartialEq<T> for Parsed<T>
+impl<T, U> PartialEq<U> for Parsed<T>
 where
-    T: PartialEq,
+    T: PartialEq<U>,
 {
-    fn eq(&self, other: &T) -> bool {
+    fn eq(&self, other: &U) -> bool {
         match self.1.as_ref() {
             Ok(t) => t == other,
             _ => false,

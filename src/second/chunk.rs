@@ -9,6 +9,9 @@ pub enum OpCode {
     Nil,
     True,
     False,
+    Pop,
+    GetGlobal,
+    DefineGlobal,
     Equal,
     Greater,
     GreaterEqual,
@@ -20,7 +23,13 @@ pub enum OpCode {
     Divide,
     Not,
     Negate,
+    Print,
     Return,
+}
+
+pub enum Read {
+    OpCode(OpCode),
+    Byte(u8),
 }
 
 #[derive(Debug, Default)]
