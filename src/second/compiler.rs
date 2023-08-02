@@ -73,7 +73,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const GREATER_EQUAL: Self   = Self(None, Some(Parser::binary), Precedence::Comparison);
     const LESS: Self            = Self(None, Some(Parser::binary), Precedence::Comparison);
     const LESS_EQUAL: Self      = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const IDENTIFIER: Self      = Self(None, None, Precedence::None);
+    const IDENTIFIER: Self      = Self(Some(Parser::variable), None, Precedence::None);
     const STRING: Self          = Self(Some(Parser::string), None, Precedence::None);
     const NUMBER: Self          = Self(Some(Parser::number), None, Precedence::None);
     const AND: Self             = Self(None, None, Precedence::None);
@@ -267,8 +267,11 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
     }
 
-    fn named_variable(name: &str) -> Result<()> {
-        
+    fn variable(&mut self) -> Result<()> {
+        let Some((l, Token::Identifier(s))) = self.prev else { unreachable!() };
+        let constant = self.chunk.add_constant(Value::new_string(s.to_string()));
+        self.chunk.write(OpCode::GetGlobal, l);
+        self.chunk.write(constant, l);
         Ok(())
     }
 

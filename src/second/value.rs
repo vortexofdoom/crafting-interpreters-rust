@@ -37,6 +37,17 @@ impl Value {
     }
 }
 
+impl<T: Deref<Target = str>> PartialEq<T> for Value {
+    fn eq(&self, other: &T) -> bool {
+        match self {
+            Self::Obj(o) => unsafe {
+                o.cast::<ObjString>().as_ref() == other
+            }
+            _ => false,      
+        }
+    }
+}
+
 pub trait IsObj {
     fn as_obj_ptr(&self) -> NonNull<Obj> {
         NonNull::from(self).cast()
@@ -81,12 +92,6 @@ pub struct ObjString {
     string: String,
 }
 
-impl PartialEq for ObjString {
-    fn eq(&self, other: &Self) -> bool {
-        self.string == other.string
-    }
-}
-
 impl Eq for ObjString {}
 
 impl Hash for ObjString {
@@ -111,6 +116,12 @@ impl Deref for ObjString {
 
     fn deref(&self) -> &Self::Target {
         &self.string
+    }
+}
+
+impl<T: Deref<Target = str>> PartialEq<T> for ObjString {
+    fn eq(&self, other: &T) -> bool {
+        self.string.deref() == other.deref()
     }
 }
 

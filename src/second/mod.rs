@@ -216,6 +216,7 @@ impl Vm {
                 OpCode::Pop => { self.pop(); },
                 OpCode::GetGlobal => {
                     let name = self.read_constant();
+                    println!("{name:?}");
                     if let Some(value) = self.globals.get(&name) {
                         self.push(*value);
                     } else {
@@ -223,10 +224,10 @@ impl Vm {
                     }
                 }
                 OpCode::DefineGlobal => {
-                        let name = self.read_constant();
-                        let value = self.peek(0);
-                        self.globals.insert(name, value);
-                        self.pop();
+                    let name = self.read_constant();
+                    let value = self.peek(0);
+                    self.globals.insert(name, value);
+                    self.pop();
                 }
                 OpCode::Equal => compare!(==),
                 OpCode::Greater => compare!(>),
