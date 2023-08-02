@@ -74,7 +74,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const LESS: Self            = Self(None, Some(Parser::binary), Precedence::Comparison);
     const LESS_EQUAL: Self      = Self(None, Some(Parser::binary), Precedence::Comparison);
     const IDENTIFIER: Self      = Self(None, None, Precedence::None);
-    const STRING: Self          = Self(None, None, Precedence::None);
+    const STRING: Self          = Self(Some(Parser::string), None, Precedence::None);
     const NUMBER: Self          = Self(Some(Parser::number), None, Precedence::None);
     const AND: Self             = Self(None, None, Precedence::None);
     const CLASS: Self           = Self(None, None, Precedence::None);
@@ -179,7 +179,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn current(&mut self) -> Option<Result<Token>> {
         match self.tokens.peek() {
-            Some(Parsed(_, Ok(t))) => Some(Ok(t.clone())),
+            Some(Parsed(_, Ok(t))) => Some(Ok(*t)),
             Some(Parsed((l, c), Err(e))) => Some(Err(anyhow!("Error at {l}, {c}: {e}"))),
             None => None,
         }
@@ -209,6 +209,21 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.prev = parsed.map(|Parsed((l, _), res)| (l, res.unwrap()));
                 Ok(())
             }
+        }
+    }
+
+    fn string(&mut self) -> Result<()> {
+        let (line, token) = self
+            .prev
+            .expect("should only call string when there is a token");
+        match token {
+            Token::String(s) => {
+                let constant = self.chunk.add_constant(Value::new_string(s.to_string()));
+                self.chunk.write(OpCode::Constant, line);
+                self.chunk.write(constant, line);
+                Ok(())
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -255,7 +270,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn number(&mut self) -> Result<()> {
-        let (line, Token::Number(n)) = self.prev.expect("only call on numbers") else { unreachable!() };
+        let (line, Token::Number(n)) = self.prev.expect("only call on numbers") else {
+            unreachable!()
+        };
         self.chunk.write(OpCode::Constant, line);
         let constant = self.chunk.add_constant(Value::Number(n));
         self.chunk.write(constant, line);

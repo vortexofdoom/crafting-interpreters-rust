@@ -42,6 +42,7 @@ impl Chunk {
 
     #[inline]
     pub fn constants(&self) -> &[Value] {
+        println!("{:?}", self.constants);
         &self.constants
     }
 

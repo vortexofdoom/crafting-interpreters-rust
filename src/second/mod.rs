@@ -8,13 +8,17 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
+    ptr::NonNull,
 };
 
 use anyhow::{anyhow, Result};
 use chunk::{Chunk, OpCode};
 use compiler::compile;
 
-use self::{debug::disassemble_instruction, scanner::scan, value::Value};
+use self::{
+    debug::disassemble_instruction,
+    value::{Obj, Value},
+};
 
 const STACK_MAX: usize = 256;
 
@@ -36,6 +40,7 @@ impl std::fmt::Display for InterpretError {
 pub struct Vm {
     chunk: Option<Chunk>,
     stack: [Value; STACK_MAX],
+    objects: Option<NonNull<Obj>>,
     sp: usize,
     ip: usize,
 }
@@ -52,6 +57,7 @@ impl Vm {
         Self {
             chunk: None,
             stack: [Value::Nil; STACK_MAX],
+            objects: None,
             sp: 0,
             ip: 0,
         }
@@ -68,6 +74,13 @@ impl Vm {
         //println!("pushing {value}, sp: {}", self.sp);
         self.stack[self.sp] = value;
         self.sp += 1;
+        // Every time we push a value, we add it to the linked list
+        if let Value::Obj(mut o) = value {
+            unsafe {
+                o.as_mut().set_next(self.objects);
+                self.objects = Some(o);
+            }
+        }
     }
 
     #[inline]
@@ -80,6 +93,7 @@ impl Vm {
     #[inline]
     fn reset_stack(&mut self) {
         self.stack.fill(Value::Nil);
+        self.sp = 0;
     }
 
     #[inline]
@@ -147,7 +161,6 @@ impl Vm {
             ($op:tt) => {{
                 let r = self.pop();
                 let l = self.pop();
-                println!("{}", l $op r);
                 self.push(Value::Bool(l $op r));
             }};
         }
@@ -197,5 +210,16 @@ impl Vm {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_functions() -> Result<()> {
+        let mut vm = Vm::new();
+        let source = "5 >= 6\n\"hello\"\n\"hi I'm dkflajf\"";
+        vm.interpret(source)
     }
 }

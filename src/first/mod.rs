@@ -40,9 +40,11 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
+type Scopes = Vec<(HashMap<String, (bool, usize)>, usize)>;
+
 #[derive(Debug)]
 struct Resolver {
-    scopes: Vec<(HashMap<String, (bool, usize)>, usize)>,
+    scopes: Scopes,
     curr_fun: Option<FunctionType>,
     curr_class: Option<ClassType>,
 }
@@ -231,21 +233,21 @@ impl Resolver {
     fn resolve_expr(&mut self, expr: &Expr, env: &mut Scope) -> Result<()> {
         //println!("{expr:?}");
         match expr {
-            Expr::Grouping(e) => self.resolve_expr(&e, env),
+            Expr::Grouping(e) => self.resolve_expr(e, env),
             Expr::Binary(l, _, r) => {
-                self.resolve_expr(&l, env)?;
-                self.resolve_expr(&r, env)
+                self.resolve_expr(l, env)?;
+                self.resolve_expr(r, env)
             }
-            Expr::Unary(_, r) => self.resolve_expr(&r, env),
+            Expr::Unary(_, r) => self.resolve_expr(r, env),
             Expr::Assignment(n, e) => {
-                self.resolve_expr(&e, env)?;
+                self.resolve_expr(e, env)?;
                 self.resolve_local(n, env)
             }
             Expr::Get(from, _) => self.resolve_expr(from, env),
             Expr::Call(callee, args) => {
-                self.resolve_expr(&callee, env)?;
+                self.resolve_expr(callee, env)?;
                 for arg in args {
-                    self.resolve_expr(&arg, env)?;
+                    self.resolve_expr(arg, env)?;
                 }
                 Ok(())
             }
@@ -369,9 +371,9 @@ impl Interpreter {
     fn evaluate(&mut self, expr: &Expr) -> Result<LoxVal> {
         //println!("{expr}");
         match expr {
-            Expr::Grouping(e) => self.evaluate(&e),
+            Expr::Grouping(e) => self.evaluate(e),
             Expr::Binary(l, op, r) => self.eval_binary(l, op, r),
-            Expr::Unary(op, r) => self.eval_unary(&op, r),
+            Expr::Unary(op, r) => self.eval_unary(op, r),
             // Assignments evaluate to the right hand side for the purposes of print
             Expr::Assignment(_, rval) => self.evaluate(rval),
             Expr::Variable(name) => Ok(self.scope.get(name, expr).cloned().unwrap_or(LoxVal::Nil)),
@@ -430,7 +432,7 @@ impl Interpreter {
             )));
         }
 
-        for (param, arg) in std::iter::zip(&function.params, args.as_ref()) {
+        for (param, arg) in std::iter::zip(&function.params, args) {
             // The only way this will error is if the supplied argument is a syntactically valid expr that doesn't evaluate successfully
             let val = self.evaluate(arg)?;
             self.scope.insert(param, val);
@@ -440,7 +442,7 @@ impl Interpreter {
             LoxVal::Function(fun, _) => LoxVal::Function(fun, instance.clone()),
             // If the result is Nil,
             LoxVal::Nil if function.fun_type == FunctionType::Initializer => {
-                LoxVal::from(instance.clone().map(|i| LoxVal::Instance(i)))
+                LoxVal::from(instance.clone().map(LoxVal::Instance))
             }
             val => val,
         };
@@ -471,11 +473,11 @@ impl Interpreter {
                 let instance = Instance::new(c.clone());
                 match c.get_method("init") {
                     Some(f) => self.exec_fun(f, args, Some(instance)),
-                    None => return Ok(LoxVal::Instance(instance)),
+                    None => Ok(LoxVal::Instance(instance)),
                 }
             }
             LoxVal::Function(function, instance) => self.exec_fun(function, args, instance),
-            _ => return Err(anyhow!("{} is not a Lox callable!", *callee)),
+            _ => Err(anyhow!("{} is not a Lox callable!", *callee)),
         }
     }
 

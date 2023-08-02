@@ -468,7 +468,7 @@ impl Statement {
     }
 
     pub fn if_stmt(cond: Expr, exec: Statement, else_exec: Option<Statement>) -> Self {
-        Self::If(cond, Box::new(exec), else_exec.map(|s| Box::new(s)))
+        Self::If(cond, Box::new(exec), else_exec.map(Box::new))
     }
 
     pub fn while_stmt(cond: Expr, exec: Statement) -> Self {

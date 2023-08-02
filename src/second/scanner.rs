@@ -423,7 +423,7 @@ impl<'a> LineScanner<'a> {
             .trim()
             .parse()
             .map_err(|_| anyhow!("error parsing number {}.", num_str))
-            .map(|n| Token::Number(n))
+            .map(Token::Number)
     }
 
     // Parses a string of characters that can begin with a letter or '_', and determines whether it is an keyword or an identifier
