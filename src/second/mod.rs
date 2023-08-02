@@ -224,10 +224,12 @@ impl Vm {
                     }
                 }
                 OpCode::DefineGlobal => {
-                    let name = self.read_constant();
-                    let value = self.peek(0);
-                    self.globals.insert(name, value);
-                    self.pop();
+                    // let name = match self.read_constant() {
+                    //     Value::Obj(o) => o.cast::<ObjString>().as_ref().
+                    // };
+                    // let value = self.peek(0);
+                    // self.globals.insert(name, value);
+                    // self.pop();
                 }
                 OpCode::Equal => compare!(==),
                 OpCode::Greater => compare!(>),
@@ -259,6 +261,7 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::{HashSet, hash_map::DefaultHasher}, hash::Hasher};
     #[test]
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
@@ -266,5 +269,23 @@ mod tests {
         vm.interpret(source)?;
         vm.free_objects();
         Ok(())
+    }
+
+    #[test]
+    fn test_hash() {
+        let val1 = Value::new_string(String::from("hello"));
+        let val2 = Value::new_string(String::from("hello"));
+        // let val1 = String::from("hello");
+        // let val2 = String::from("hello");
+        println!("{}, {}", calc_hash(&val1), calc_hash(&val2));
+        let mut set = HashSet::new();
+        set.insert(val1);
+        assert!(!set.insert(val2));
+    }
+
+    fn calc_hash<T: std::hash::Hash>(t: &T) -> u64 {
+        let mut s = DefaultHasher::new();
+        t.hash(&mut s);
+        s.finish()
     }
 }

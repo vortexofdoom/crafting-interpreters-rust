@@ -1,4 +1,4 @@
-use std::{ptr::NonNull, hash::Hash, ops::Deref};
+use std::{ptr::NonNull, hash::Hash, ops::Deref, fmt::Display, borrow::BorrowMut};
 
 use anyhow::{anyhow, Result};
 
@@ -19,7 +19,7 @@ impl Hash for Value {
             Value::Number(n) => n.to_bits().hash(state),
             Value::Obj(o) => {
                 unsafe {
-                    o.cast::<ObjString>().as_ref().hash(state);
+                    o.cast::<ObjString>().hash(state);
                 }
             }
             Value::Nil => (),
@@ -96,7 +96,7 @@ impl Eq for ObjString {}
 
 impl Hash for ObjString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.string.hash(state);
+        self.string.deref().hash(state);
     }
 }
 
@@ -121,7 +121,9 @@ impl Deref for ObjString {
 
 impl<T: Deref<Target = str>> PartialEq<T> for ObjString {
     fn eq(&self, other: &T) -> bool {
-        self.string.deref() == other.deref()
+        println!("{self}, {}", other.deref());
+        let other = other.deref();
+        self.string == other
     }
 }
 
