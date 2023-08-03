@@ -229,6 +229,14 @@ impl Vm {
                     self.globals.insert(name, value);
                     self.pop();
                 }
+                OpCode::SetGlobal => {
+                    let name = self.read_constant();
+                    let value = self.peek(0);
+                    if self.globals.insert(name, value).is_none() {
+                        self.globals.remove(&name);
+                        return Err(anyhow!(InterpretError::Runtime));
+                    }
+                }
                 OpCode::Equal => compare!(==),
                 OpCode::Greater => compare!(>),
                 OpCode::GreaterEqual => compare!(>=),

@@ -43,7 +43,7 @@ impl Precedence {
     }
 }
 
-type ParseFn<'a, T> = Option<fn(&mut Parser<'a, T>) -> Result<()>>;
+type ParseFn<'a, T> = Option<fn(&mut Parser<'a, T>, bool) -> Result<()>>;
 
 #[derive(Debug, Clone, Copy)]
 struct ParseRule<'a, T: Iterator<Item = Parsed<Token<'a>>>>(
@@ -267,11 +267,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
     }
 
-    fn variable(&mut self) -> Result<()> {
+    fn variable(&mut self, can_assign: bool) -> Result<()> {
         let Some((l, Token::Identifier(s))) = self.prev else { unreachable!() };
-        let constant = self.chunk.add_constant(Value::new_string(s.to_string()));
-        self.chunk.write(OpCode::GetGlobal, l);
-        self.chunk.write(constant, l);
+        let arg = self.chunk.add_constant(Value::new_string(s.to_string()));
+        if can_assign && self.match_token(TokenType::Equal)? {
+            self.expression()?;
+            self.chunk.write(OpCode::SetGlobal, l);
+        } else {
+            self.chunk.write(OpCode::GetGlobal, l);
+        }
+        self.chunk.write(arg, l);
         Ok(())
     }
 
@@ -299,7 +304,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn string(&mut self) -> Result<()> {
+    fn string(&mut self, can_assign: bool) -> Result<()> {
         let (line, token) = self
             .prev
             .expect("should only call string when there is a token");
@@ -318,7 +323,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.parse_precedence(Precedence::Assignment)
     }
 
-    fn unary(&mut self) -> Result<()> {
+    fn unary(&mut self, can_assign: bool) -> Result<()> {
         let (line, token) = self
             .prev
             .expect("should only call unary when there is a token");
@@ -332,7 +337,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn binary(&mut self) -> Result<()> {
+    fn binary(&mut self, can_assign: bool) -> Result<()> {
         let (line, token) = self
             .prev
             .expect("should only call binary when there is a token");
@@ -356,7 +361,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn number(&mut self) -> Result<()> {
+    fn number(&mut self, can_assign: bool) -> Result<()> {
         let (line, Token::Number(n)) = self.prev.expect("only call on numbers") else {
             unreachable!()
         };
@@ -366,7 +371,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn literal(&mut self) -> Result<()> {
+    fn literal(&mut self, can_assign: bool) -> Result<()> {
         match self.prev {
             Some((i, Token::False)) => self.chunk.write(OpCode::False, i),
             Some((i, Token::Nil)) => self.chunk.write(OpCode::Nil, i),
@@ -376,7 +381,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn grouping(&mut self) -> Result<()> {
+    fn grouping(&mut self, can_assign: bool) -> Result<()> {
         self.expression()?;
         self.consume_token(TokenType::RightParen)?;
         Ok(())
@@ -386,8 +391,11 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.advance()?;
         if let Some((_, token)) = self.prev {
             println!("{token}");
+            let can_assign = precedence <= Precedence::Assignment;
             match ParseRule::<T>::prefix(token) {
-                Some(prefix_rule) => prefix_rule(self)?,
+                Some(prefix_rule) => {
+                    prefix_rule(self, can_assign)?
+                },
                 None => return Err(anyhow!("expect expression.")),
             }
 
@@ -396,7 +404,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 match self.current() {
                     Some(Ok(_)) => {
                         self.advance()?;
-                        ParseRule::infix(self.previous()).expect("should be an infix rule.")(self)?;
+                        ParseRule::infix(self.previous()).expect("should be an infix rule.")(self, can_assign)?;
+                        if can_assign && self.match_token(TokenType::Equal)? {
+                            return Err(anyhow!("Invalid assignment target"));
+                        }
                     }
                     Some(Err(e)) => return Err(e),
                     None => break,
