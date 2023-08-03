@@ -3,19 +3,9 @@
 mod first;
 mod second;
 
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-};
-
 use anyhow::Result;
 use clap::Parser;
-use second::{
-    chunk::{Chunk, OpCode},
-    scanner::scan,
-    InterpretError, Vm,
-};
+use second::Vm;
 
 #[derive(Debug, Parser)]
 pub struct LoxArgs {

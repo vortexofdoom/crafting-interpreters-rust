@@ -1,4 +1,4 @@
-use std::{ptr::NonNull, hash::Hash, ops::Deref, fmt::Display, borrow::BorrowMut};
+use std::{hash::Hash, ops::Deref, ptr::NonNull};
 
 use anyhow::{anyhow, Result};
 
@@ -17,11 +17,9 @@ impl Hash for Value {
         match self {
             Value::Bool(b) => b.hash(state),
             Value::Number(n) => n.to_bits().hash(state),
-            Value::Obj(o) => {
-                unsafe {
-                    o.cast::<ObjString>().as_ref().hash(state);
-                }
-            }
+            Value::Obj(o) => unsafe {
+                o.cast::<ObjString>().as_ref().hash(state);
+            },
             Value::Nil => (),
         }
     }
@@ -40,10 +38,8 @@ impl Value {
 impl PartialEq<str> for Value {
     fn eq(&self, other: &str) -> bool {
         match self {
-            Self::Obj(o) => unsafe {
-                o.cast::<ObjString>().as_ref().deref() == other
-            }
-            _ => false,      
+            Self::Obj(o) => unsafe { o.cast::<ObjString>().as_ref().deref() == other },
+            _ => false,
         }
     }
 }
@@ -241,10 +237,13 @@ impl std::cmp::PartialEq for Value {
             (Self::Bool(l), Self::Bool(r)) => l == r,
             (Self::Number(l), Self::Number(r)) => l == r,
             (Self::Obj(l), Self::Obj(r)) => unsafe {
-                l.as_ref().kind == r.as_ref().kind && match l.as_ref().kind {
-                    ObjType::String => l.cast::<ObjString>().as_ref() == r.cast::<ObjString>().as_ref(),
-                    ObjType::Function => todo!(),
-                }
+                l.as_ref().kind == r.as_ref().kind
+                    && match l.as_ref().kind {
+                        ObjType::String => {
+                            l.cast::<ObjString>().as_ref() == r.cast::<ObjString>().as_ref()
+                        }
+                        ObjType::Function => todo!(),
+                    }
             },
             (Self::Nil, Self::Nil) => true,
             _ => false,

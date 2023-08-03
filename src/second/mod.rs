@@ -5,10 +5,11 @@ pub mod scanner;
 pub mod value;
 
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Read, Write},
     path::Path,
-    ptr::NonNull, collections::HashMap,
+    ptr::NonNull,
 };
 
 use anyhow::{anyhow, Result};
@@ -17,7 +18,7 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    value::{Obj, Value, ObjType, ObjString},
+    value::{Obj, ObjType, Value},
 };
 
 const STACK_MAX: usize = 256;
@@ -110,7 +111,7 @@ impl Vm {
         println!("{}", Value::Obj(obj));
         let ptr = match obj.as_ref().kind {
             ObjType::String => obj.as_ptr(),
-            ObjType::Function => todo!()
+            ObjType::Function => todo!(),
         };
 
         drop(Box::from_raw(ptr));
@@ -162,7 +163,7 @@ impl Vm {
             std::io::stdout().flush().expect("new prompt failed");
             let start = input.len();
             if std::io::stdin().read_line(&mut input).is_ok() {
-                if input == "\n" {
+                if matches!(&input[start..], "\r\n" | "\n") {
                     break;
                 } else {
                     if let Err(e) = self.interpret(&input[start..]) {
@@ -213,7 +214,7 @@ impl Vm {
                 OpCode::Nil => self.push(Value::Nil),
                 OpCode::True => self.push(Value::Bool(true)),
                 OpCode::False => self.push(Value::Bool(false)),
-                OpCode::Pop => { self.pop(); },
+                OpCode::Pop => _ = self.pop(),
                 OpCode::GetGlobal => {
                     let name = self.read_constant();
                     println!("{name:?}");
@@ -267,7 +268,10 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::{HashSet, hash_map::DefaultHasher}, hash::Hasher};
+    use std::{
+        collections::{hash_map::DefaultHasher, HashSet},
+        hash::Hasher,
+    };
     #[test]
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();

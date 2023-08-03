@@ -227,7 +227,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 return;
             }
             match t {
-                Token::Class 
+                Token::Class
                 | Token::Fun
                 | Token::For
                 | Token::If
@@ -235,7 +235,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 | Token::Return
                 | Token::Var
                 | Token::While => return,
-                _ => {let _ = self.advance();},
+                _ => {
+                    let _ = self.advance();
+                }
             }
         }
     }
@@ -263,12 +265,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn parse_variable(&mut self) -> Result<(u8, usize)> {
         self.consume_token(TokenType::Identifier)?;
-        let Some((l, Token::Identifier(s))) = self.prev else { unreachable!() };
+        let Some((l, Token::Identifier(s))) = self.prev else {
+            unreachable!()
+        };
         Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
     }
 
     fn variable(&mut self, can_assign: bool) -> Result<()> {
-        let Some((l, Token::Identifier(s))) = self.prev else { unreachable!() };
+        let Some((l, Token::Identifier(s))) = self.prev else {
+            unreachable!()
+        };
         let arg = self.chunk.add_constant(Value::new_string(s.to_string()));
         if can_assign && self.match_token(TokenType::Equal)? {
             self.expression()?;
@@ -281,7 +287,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn statement(&mut self) -> Result<()> {
-        let (line, token) = self.current().unwrap()?;
+        // TODO: fix error propagation
+        let Some(Ok((line, token))) = self.current() else {
+            return Ok(());
+        };
         match token {
             Token::Class => todo!(),
             Token::Fun => todo!(),
@@ -292,7 +301,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.expression()?;
                 self.consume_token(TokenType::Semicolon)?;
                 self.chunk.write(OpCode::Print, line);
-            },
+            }
             Token::Return => todo!(),
             Token::While => todo!(),
             _ => {
@@ -393,9 +402,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             println!("{token}");
             let can_assign = precedence <= Precedence::Assignment;
             match ParseRule::<T>::prefix(token) {
-                Some(prefix_rule) => {
-                    prefix_rule(self, can_assign)?
-                },
+                Some(prefix_rule) => prefix_rule(self, can_assign)?,
                 None => return Err(anyhow!("expect expression.")),
             }
 
@@ -438,6 +445,5 @@ pub fn compile(source: &str) -> Result<Chunk> {
             break;
         }
     }
-    parser.chunk.write(OpCode::Return, 0);
     Ok(parser.chunk)
 }

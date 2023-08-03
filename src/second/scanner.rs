@@ -1,13 +1,6 @@
 use anyhow::{anyhow, Result};
 use enum_map::Enum;
-use itertools::Itertools;
-use num_enum::{FromPrimitive, IntoPrimitive};
-use std::{
-    iter::{Enumerate, Peekable},
-    str::{Bytes, CharIndices, Lines},
-};
-
-use super::value::Value;
+use std::iter::Peekable;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -205,7 +198,7 @@ impl PartialEq<TokenType> for Token<'_> {
     fn eq(&self, other: &TokenType) -> bool {
         let token_type = TokenType::from(*self);
         token_type == *other
-    }    
+    }
 }
 
 impl<'a> Token<'a> {

@@ -28,11 +28,6 @@ pub enum OpCode {
     Return,
 }
 
-pub enum Read {
-    OpCode(OpCode),
-    Byte(u8),
-}
-
 #[derive(Debug, Default)]
 pub struct Chunk {
     code: Vec<u8>,
