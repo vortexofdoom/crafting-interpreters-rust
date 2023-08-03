@@ -224,12 +224,10 @@ impl Vm {
                     }
                 }
                 OpCode::DefineGlobal => {
-                    // let name = match self.read_constant() {
-                    //     Value::Obj(o) => o.cast::<ObjString>().as_ref().
-                    // };
-                    // let value = self.peek(0);
-                    // self.globals.insert(name, value);
-                    // self.pop();
+                    let name = self.read_constant();
+                    let value = self.peek(0);
+                    self.globals.insert(name, value);
+                    self.pop();
                 }
                 OpCode::Equal => compare!(==),
                 OpCode::Greater => compare!(>),
@@ -275,12 +273,13 @@ mod tests {
     fn test_hash() {
         let val1 = Value::new_string(String::from("hello"));
         let val2 = Value::new_string(String::from("hello"));
+        assert_eq!(val1, val2);
         // let val1 = String::from("hello");
         // let val2 = String::from("hello");
         println!("{}, {}", calc_hash(&val1), calc_hash(&val2));
         let mut set = HashSet::new();
         set.insert(val1);
-        assert!(!set.insert(val2));
+        assert!(set.get(&val2).is_some());
     }
 
     fn calc_hash<T: std::hash::Hash>(t: &T) -> u64 {

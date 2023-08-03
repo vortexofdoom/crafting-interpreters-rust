@@ -1,5 +1,4 @@
 #![feature(let_chains)]
-#![feature(box_into_inner)]
 #![allow(non_upper_case_globals, unused)]
 mod first;
 mod second;

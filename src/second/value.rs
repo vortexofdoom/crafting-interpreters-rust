@@ -19,7 +19,7 @@ impl Hash for Value {
             Value::Number(n) => n.to_bits().hash(state),
             Value::Obj(o) => {
                 unsafe {
-                    o.cast::<ObjString>().hash(state);
+                    o.cast::<ObjString>().as_ref().hash(state);
                 }
             }
             Value::Nil => (),
@@ -37,11 +37,11 @@ impl Value {
     }
 }
 
-impl<T: Deref<Target = str>> PartialEq<T> for Value {
-    fn eq(&self, other: &T) -> bool {
+impl PartialEq<str> for Value {
+    fn eq(&self, other: &str) -> bool {
         match self {
             Self::Obj(o) => unsafe {
-                o.cast::<ObjString>().as_ref() == other
+                o.cast::<ObjString>().as_ref().deref() == other
             }
             _ => false,      
         }
@@ -61,7 +61,7 @@ pub enum ObjType {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Obj {
     pub kind: ObjType,
     pub next: Option<NonNull<Obj>>,
@@ -96,7 +96,7 @@ impl Eq for ObjString {}
 
 impl Hash for ObjString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.string.deref().hash(state);
+        self.string.hash(state);
     }
 }
 
@@ -119,11 +119,9 @@ impl Deref for ObjString {
     }
 }
 
-impl<T: Deref<Target = str>> PartialEq<T> for ObjString {
-    fn eq(&self, other: &T) -> bool {
-        println!("{self}, {}", other.deref());
-        let other = other.deref();
-        self.string == other
+impl PartialEq for ObjString {
+    fn eq(&self, other: &Self) -> bool {
+        self.string == other.string
     }
 }
 
@@ -240,8 +238,14 @@ impl std::ops::Not for Value {
 impl std::cmp::PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
-            (Self::Number(l0), Self::Number(r0)) => l0 == r0,
+            (Self::Bool(l), Self::Bool(r)) => l == r,
+            (Self::Number(l), Self::Number(r)) => l == r,
+            (Self::Obj(l), Self::Obj(r)) => unsafe {
+                l.as_ref().kind == r.as_ref().kind && match l.as_ref().kind {
+                    ObjType::String => l.cast::<ObjString>().as_ref() == r.cast::<ObjString>().as_ref(),
+                    ObjType::Function => todo!(),
+                }
+            },
             (Self::Nil, Self::Nil) => true,
             _ => false,
         }
