@@ -5,7 +5,7 @@ pub mod scanner;
 pub mod value;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Write},
     path::Path,
@@ -18,10 +18,18 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    value::{Obj, ObjType, Value},
+    value::{Obj, ObjFunction, ObjType, Value, ObjString},
 };
 
 const STACK_MAX: usize = 256;
+
+#[derive(Debug, Clone)]
+struct CallFrame<'a> {
+    // could make a reference... probably SHOULD
+    function: &'a ObjFunction,
+    ip: usize,
+    slots: &'a [Value],
+}
 
 #[derive(Debug)]
 pub enum InterpretError {
@@ -43,7 +51,7 @@ pub struct Vm {
     stack: [Value; STACK_MAX],
     sp: usize,
     ip: usize,
-    objects: Option<NonNull<Obj>>,
+    objects: HashSet<*mut Obj>,
     globals: HashMap<Value, Value>,
 }
 
@@ -61,7 +69,7 @@ impl Vm {
             stack: [Value::Nil; STACK_MAX],
             sp: 0,
             ip: 0,
-            objects: None,
+            objects: HashSet::new(),
             globals: HashMap::new(),
         }
     }
@@ -79,10 +87,12 @@ impl Vm {
         self.sp += 1;
         // Every time we push a value, we add it to the linked list
         if let Value::Obj(mut o) = value {
-            unsafe {
-                o.as_mut().set_next(self.objects);
-                self.objects = Some(o);
-            }
+            self.objects.insert(o.as_ptr());
+            // unsafe {
+            //     println!("push curr: {:?}, new: {:?}", self.objects, o);
+            //     (*o.as_ptr()).next = self.objects.take();
+            //     self.objects = Some(o);
+            // }
         }
     }
 
@@ -99,22 +109,23 @@ impl Vm {
     }
 
     pub fn free_objects(&mut self) {
-        while let Some(mut obj) = self.objects {
+        for obj in (&mut self.objects).iter() {
             unsafe {
-                self.objects = obj.as_mut().next.take();
-                Vm::free_object(obj);
+                match (*(*obj)).kind {
+                    ObjType::String => Box::from_raw(obj.cast::<ObjString>()),
+                    ObjType::Function => todo!(),
+                };
             }
         }
+        self.objects.clear();
     }
 
-    unsafe fn free_object(obj: NonNull<Obj>) {
-        println!("{}", Value::Obj(obj));
-        let ptr = match obj.as_ref().kind {
-            ObjType::String => obj.as_ptr(),
+    unsafe fn free_object(&mut self, obj: *mut Obj) {
+        match (*obj).kind {
+            ObjType::String => Box::from_raw(obj.cast::<ObjString>()),
             ObjType::Function => todo!(),
         };
-
-        drop(Box::from_raw(ptr));
+        self.objects.remove(&obj);
     }
 
     #[inline]
@@ -169,7 +180,6 @@ impl Vm {
                     if let Err(e) = self.interpret(&input[start..]) {
                         println!("{e}");
                     }
-                    input.clear();
                 }
             }
         }
@@ -215,9 +225,13 @@ impl Vm {
                 OpCode::True => self.push(Value::Bool(true)),
                 OpCode::False => self.push(Value::Bool(false)),
                 OpCode::Pop => _ = self.pop(),
+                OpCode::GetLocal => {
+                    let slot = self.read_byte();
+                    self.push(self.stack[slot as usize]);
+                },
                 OpCode::GetGlobal => {
                     let name = self.read_constant();
-                    println!("{name:?}");
+                    //println!("{name:?}");
                     if let Some(value) = self.globals.get(&name) {
                         self.push(*value);
                     } else {
@@ -230,6 +244,10 @@ impl Vm {
                     self.globals.insert(name, value);
                     self.pop();
                 }
+                OpCode::SetLocal => {
+                    let slot = self.read_byte();
+                    self.stack[slot as usize] = self.peek(0);
+                },
                 OpCode::SetGlobal => {
                     let name = self.read_constant();
                     let value = self.peek(0);

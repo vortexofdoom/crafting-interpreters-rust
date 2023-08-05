@@ -19,7 +19,12 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         print!("{:04} ", line + 1);
     }
     match OpCode::try_from(chunk.code()[offset]).unwrap() {
-        OpCode::Constant | OpCode::DefineGlobal | OpCode::GetGlobal | OpCode::SetGlobal => {
+        OpCode::Constant
+        | OpCode::DefineGlobal
+        | OpCode::GetLocal
+        | OpCode::SetLocal
+        | OpCode::GetGlobal 
+        | OpCode::SetGlobal => {
             constant_inst(chunk, offset)
         }
         _ => simple_inst(chunk, offset),

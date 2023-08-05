@@ -10,8 +10,10 @@ pub enum OpCode {
     True,
     False,
     Pop,
+    GetLocal,
     GetGlobal,
     DefineGlobal,
+    SetLocal,
     SetGlobal,
     Equal,
     Greater,
@@ -28,7 +30,7 @@ pub enum OpCode {
     Return,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Chunk {
     code: Vec<u8>,
     lines: Vec<usize>,
@@ -47,7 +49,7 @@ impl Chunk {
 
     #[inline]
     pub fn constants(&self) -> &[Value] {
-        println!("{:?}", self.constants);
+        //println!("{:?}", self.constants);
         &self.constants
     }
 

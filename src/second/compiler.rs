@@ -162,14 +162,85 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
 //     }
 // }
 
+#[derive(Debug, Clone, Copy)]
+struct Local<'a> {
+    name: &'a str,
+    depth: isize,
+}
+
+impl Default for Local<'_> {
+    fn default() -> Self {
+        Self { name: Default::default(), depth: -1 }
+    }
+}
+
+#[derive(Debug)]
+struct Compiler<'a> {
+    enclosing: Option<&'a mut Self>,
+    locals: [Local<'a>; 256],
+    local_count: usize,
+    scope_depth: usize,
+}
+
+impl<'a> Compiler<'a> {
+    const MAX_LOCALS: usize = 256;
+
+    fn new() -> Self {
+        Self {
+            enclosing: None,
+            locals: [Local::default(); 256],
+            local_count: 0,
+            scope_depth: 0,
+        }
+    }
+
+    fn new_enclosed(enclosing: &'a mut Self) -> Self {
+        Self {
+            enclosing: Some(enclosing),
+            locals: [Local::default(); 256],
+            local_count: 0,
+            scope_depth: 0,
+        }
+    }
+}
+
 struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
     chunk: Chunk,
     prev: Option<(usize, Token<'a>)>,
+    current_compiler: Option<&'a mut Compiler<'a>>,
     tokens: Peekable<T>,
 }
 
 // Can probably do everything with peek() instead of keeping the previous token, but we'll find out
 impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
+    #[inline]
+    fn begin_scope(&mut self) {
+        if let Some(ref mut c) = self.current_compiler {
+            c.scope_depth += 1;
+        }
+    }
+
+    #[inline]
+    fn end_scope(&mut self) -> Result<()> {
+        let compiler = self.current_compiler.as_mut().unwrap();
+        compiler.scope_depth -= 1;
+
+        while compiler.local_count > 0
+            && compiler.locals[compiler.local_count - 1].depth > compiler.scope_depth as isize
+        {
+            self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+            compiler.local_count -= 1;
+        }
+        Ok(())
+    }
+
+    fn block(&mut self) -> Result<()> {
+        while self.tokens.peek().is_some_and(|p| *p != Token::RightBrace) {
+            self.declaration()?;
+        }
+        self.consume_token(TokenType::RightBrace)
+    }
+
     fn consume_token(&mut self, token: TokenType) -> Result<()> {
         match self.tokens.peek() {
             Some(Parsed(_, Ok(t))) if *t == token => self.advance(),
@@ -258,6 +329,15 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             self.chunk.write(OpCode::Nil, line);
         }
         self.consume_token(TokenType::Semicolon)?;
+
+        // Define variable
+        if self
+            .current_compiler
+            .as_ref()
+            .is_some_and(|c| c.scope_depth > 0)
+        {
+            return Ok(());
+        }
         self.chunk.write(OpCode::DefineGlobal, line);
         self.chunk.write(global, line);
         Ok(())
@@ -265,22 +345,89 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn parse_variable(&mut self) -> Result<(u8, usize)> {
         self.consume_token(TokenType::Identifier)?;
+        // this is infalliable since if it wasn't an identifier we'd return with an error after the previous line
         let Some((l, Token::Identifier(s))) = self.prev else {
             unreachable!()
         };
+
+        self.declare_variable()?;
+        
         Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
     }
 
+    fn declare_variable(&mut self) -> Result<()> {
+        if self
+            .current_compiler
+            .as_ref()
+            .is_some_and(|c| c.scope_depth == 0)
+        {
+            return Ok(());
+        }
+
+        match self.prev {
+            Some((_, Token::Identifier(name))) => {
+                let compiler = self.current_compiler.as_ref().unwrap();
+                for i in (0..compiler.local_count).rev() {
+                    let local = compiler.locals[i];
+                    if local.depth != -1 && local.depth < compiler.scope_depth as isize {
+                        break;
+                    }
+
+                    if local.name == name {
+                        return Err(anyhow!("already a variable named {name} in this scope."));
+                    }
+                }
+                self.add_local(name)
+            }
+            _ => Err(anyhow!("expect identifier")),
+        }
+    }
+
+    fn add_local(&mut self, name: &'a str) -> Result<()> {
+        let mut compiler = self.current_compiler.as_mut().unwrap();
+        if compiler.local_count == Compiler::MAX_LOCALS {
+            return Err(anyhow!("Too many local variables"));
+        }
+        compiler.locals[compiler.local_count] = Local {
+            name,
+            depth: compiler.scope_depth as isize,
+        };
+        compiler.local_count += 1;
+        Ok(())
+    }
+
+    fn resolve_local(&mut self, name: &str) -> Option<u8> {
+        let compiler = self.current_compiler.as_ref().unwrap();
+        for i in (0..compiler.local_count).rev() {
+            if compiler.locals[i].name == name {
+                return Some(i as u8);
+            }
+        }
+        None
+    }
+
     fn variable(&mut self, can_assign: bool) -> Result<()> {
-        let Some((l, Token::Identifier(s))) = self.prev else {
+        let Some((l, Token::Identifier(name))) = self.prev else {
             unreachable!()
         };
-        let arg = self.chunk.add_constant(Value::new_string(s.to_string()));
+
+        let (arg, get_op, set_op) =
+            if let Some(i) = self.resolve_local(name) {
+                (i, OpCode::GetLocal, OpCode::SetLocal)
+            } else {
+                (
+                    self.chunk.add_constant(Value::new_string(name.to_string())),
+                    OpCode::GetGlobal,
+                    OpCode::SetGlobal,
+                )
+            };
+
+        
         if can_assign && self.match_token(TokenType::Equal)? {
             self.expression()?;
-            self.chunk.write(OpCode::SetGlobal, l);
+            self.chunk.write(set_op, l);
         } else {
-            self.chunk.write(OpCode::GetGlobal, l);
+            self.chunk.write(get_op, l);
         }
         self.chunk.write(arg, l);
         Ok(())
@@ -292,6 +439,12 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             return Ok(());
         };
         match token {
+            Token::LeftBrace => {
+                self.advance()?;
+                self.begin_scope();
+                self.block()?;
+                self.end_scope();
+            }
             Token::Class => todo!(),
             Token::Fun => todo!(),
             Token::For => todo!(),
@@ -399,7 +552,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
         self.advance()?;
         if let Some((_, token)) = self.prev {
-            println!("{token}");
             let can_assign = precedence <= Precedence::Assignment;
             match ParseRule::<T>::prefix(token) {
                 Some(prefix_rule) => prefix_rule(self, can_assign)?,
@@ -426,13 +578,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 }
 
 pub fn compile(source: &str) -> Result<Chunk> {
-    for token in scan(source) {
-        println!("Token: {token}");
-    }
+    // for token in scan(source) {
+    //     println!("Token: {token}");
+    // }
+
+    let mut compiler = Compiler::new();
 
     let mut parser = Parser {
         chunk: Chunk::new(),
         prev: None,
+        current_compiler: Some(&mut compiler),
         tokens: scan(source),
     };
 
