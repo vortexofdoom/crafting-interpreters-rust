@@ -71,7 +71,9 @@ impl std::ops::Add for Value {
         unsafe {
             match (self, rhs) {
                 (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
-                (Value::Obj(o), _) | (_, Value::Obj(o)) if (*o.as_ptr()).kind == ObjType::String => {
+                (Value::Obj(o), _) | (_, Value::Obj(o))
+                    if (*o.as_ptr()).kind == ObjType::String =>
+                {
                     let new_string = ObjString::new(format!("{self}{rhs}"));
                     let ptr = NonNull::new(Box::into_raw(Box::new(new_string)))
                         .unwrap()

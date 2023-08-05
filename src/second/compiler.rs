@@ -1,4 +1,4 @@
-use std::{iter::Peekable, ops::Index, any};
+use std::{iter::Peekable, ops::Index};
 
 use anyhow::{anyhow, Result};
 use enum_map::{Enum, EnumMap};
@@ -170,7 +170,10 @@ struct Local<'a> {
 
 impl Default for Local<'_> {
     fn default() -> Self {
-        Self { name: Default::default(), depth: -1 }
+        Self {
+            name: Default::default(),
+            depth: -1,
+        }
     }
 }
 
@@ -351,7 +354,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         };
 
         self.declare_variable()?;
-        
+
         Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
     }
 
@@ -411,18 +414,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             unreachable!()
         };
 
-        let (arg, get_op, set_op) =
-            if let Some(i) = self.resolve_local(name) {
-                (i, OpCode::GetLocal, OpCode::SetLocal)
-            } else {
-                (
-                    self.chunk.add_constant(Value::new_string(name.to_string())),
-                    OpCode::GetGlobal,
-                    OpCode::SetGlobal,
-                )
-            };
+        let (arg, get_op, set_op) = if let Some(i) = self.resolve_local(name) {
+            (i, OpCode::GetLocal, OpCode::SetLocal)
+        } else {
+            (
+                self.chunk.add_constant(Value::new_string(name.to_string())),
+                OpCode::GetGlobal,
+                OpCode::SetGlobal,
+            )
+        };
 
-        
         if can_assign && self.match_token(TokenType::Equal)? {
             self.expression()?;
             self.chunk.write(set_op, l);
@@ -471,7 +472,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn and(&mut self, can_assign: bool) -> Result<()> {
         println!("{:?}", self.prev);
         let line = self.prev.unwrap().0;
-        let end_jump =  self.emit_jump(OpCode::JumpIfFalse, line);
+        let end_jump = self.emit_jump(OpCode::JumpIfFalse, line);
         self.chunk.write(OpCode::Pop, line);
         self.parse_precedence(Precedence::And)?;
         self.patch_jump(end_jump as usize)
@@ -515,7 +516,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.begin_scope();
                 self.advance()?;
                 self.consume_token(TokenType::LeftParen)?;
-                
+
                 if self.match_token(TokenType::Semicolon)? {
                     // No initializer
                 } else if self.match_token(TokenType::Var)? {
@@ -529,7 +530,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 if !self.match_token(TokenType::Semicolon)? {
                     self.expression()?;
                     self.consume_token(TokenType::Semicolon)?;
-                    
+
                     let line = self.prev.unwrap().0;
                     exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                     self.chunk.write(OpCode::Pop, line);
@@ -555,7 +556,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                     self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
                 }
                 self.end_scope();
-            },
+            }
             Token::If => {
                 self.advance()?;
                 self.consume_token(TokenType::LeftParen)?;
@@ -566,7 +567,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
 
                 self.statement()?;
-                
+
                 let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
                 self.patch_jump(then_jump as usize)?;
                 self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
@@ -575,7 +576,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                     self.statement()?;
                 }
                 self.patch_jump(else_jump as usize)?;
-            },
+            }
             Token::Print => {
                 self.advance()?;
                 self.expression()?;
@@ -598,7 +599,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
                 self.patch_jump(exit_jump as usize)?;
                 self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
-            },
+            }
             _ => self.expression_stmt(line)?,
         }
         Ok(())

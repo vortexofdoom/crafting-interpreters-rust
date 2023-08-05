@@ -18,14 +18,13 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    value::{Obj, ObjFunction, ObjType, Value, ObjString},
+    value::{Obj, ObjFunction, ObjString, ObjType, Value},
 };
 
 const STACK_MAX: usize = 256;
 
 #[derive(Debug, Clone)]
 struct CallFrame<'a> {
-    // could make a reference... probably SHOULD
     function: &'a ObjFunction,
     ip: usize,
     slots: &'a [Value],
@@ -51,6 +50,10 @@ pub struct Vm {
     stack: [Value; STACK_MAX],
     sp: usize,
     ip: usize,
+    // With the rest of the architecture being what it is, clox's linked list object model was difficult,
+    // since the only reliable time to append to the list was on every push, which means double free if not careful
+    // Probably worth revisiting for performance, but maybe it's not even that bad, as iteration only has
+    // a little more overhead, and the same amount of pointer indirection?
     objects: HashSet<*mut Obj>,
     globals: HashMap<Value, Value>,
 }
@@ -238,7 +241,7 @@ impl Vm {
                 OpCode::GetLocal => {
                     let slot = self.read_byte();
                     self.push(self.stack[slot as usize]);
-                },
+                }
                 OpCode::GetGlobal => {
                     let name = self.read_constant();
                     //println!("{name:?}");
@@ -257,7 +260,7 @@ impl Vm {
                 OpCode::SetLocal => {
                     let slot = self.read_byte();
                     self.stack[slot as usize] = self.peek(0);
-                },
+                }
                 OpCode::SetGlobal => {
                     let name = self.read_constant();
                     let value = self.peek(0);
