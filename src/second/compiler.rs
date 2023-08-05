@@ -76,7 +76,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const IDENTIFIER: Self      = Self(Some(Parser::variable), None, Precedence::None);
     const STRING: Self          = Self(Some(Parser::string), None, Precedence::None);
     const NUMBER: Self          = Self(Some(Parser::number), None, Precedence::None);
-    const AND: Self             = Self(None, None, Precedence::None);
+    const AND: Self             = Self(None, Some(Parser::and), Precedence::And);
     const CLASS: Self           = Self(None, None, Precedence::None);
     const ELSE: Self            = Self(None, None, Precedence::None);
     const FALSE: Self           = Self(Some(Parser::literal), None, Precedence::None);
@@ -84,7 +84,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const FUN: Self             = Self(None, None, Precedence::None);
     const IF: Self              = Self(None, None, Precedence::None);
     const NIL: Self             = Self(Some(Parser::literal), None, Precedence::None);
-    const OR: Self              = Self(None, None, Precedence::None);
+    const OR: Self              = Self(None, Some(Parser::or), Precedence::Or);
     const PRINT: Self           = Self(None, None, Precedence::None);
     const RETURN: Self          = Self(None, None, Precedence::None);
     const SUPER: Self           = Self(None, None, Precedence::None);
@@ -433,11 +433,25 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn emit_jump(&mut self, op: OpCode, line: usize) -> usize {
+    fn emit_jump(&mut self, op: OpCode, line: usize) -> isize {
         self.chunk.write(op, line);
         self.chunk.write(0xff, line);
         self.chunk.write(0xff, line);
-        self.chunk.code().len() - 2
+        self.chunk.code().len() as isize - 2
+    }
+
+    fn emit_loop(&mut self, start: usize) -> Result<()> {
+        let line = self.prev.unwrap().0;
+        self.chunk.write(OpCode::Loop, line);
+        let offset = self.chunk.code().len() - start + 2;
+        if offset > u16::MAX as usize {
+            return Err(anyhow!("loop body too large."));
+        }
+        let hi = ((offset >> 8) & 0xff) as u8;
+        let lo = (offset & 0xff) as u8;
+        self.chunk.write(hi, line);
+        self.chunk.write(lo, line);
+        Ok(())
     }
 
     fn patch_jump(&mut self, offset: usize) -> Result<()> {
@@ -451,6 +465,35 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let [hi, lo] = (jump as u16).to_be_bytes();
         code[offset] = hi;
         code[offset + 1] = lo;
+        Ok(())
+    }
+
+    fn and(&mut self, can_assign: bool) -> Result<()> {
+        println!("{:?}", self.prev);
+        let line = self.prev.unwrap().0;
+        let end_jump =  self.emit_jump(OpCode::JumpIfFalse, line);
+        self.chunk.write(OpCode::Pop, line);
+        self.parse_precedence(Precedence::And)?;
+        self.patch_jump(end_jump as usize)
+    }
+
+    fn or(&mut self, can_assign: bool) -> Result<()> {
+        println!("called or {:?}", self.prev);
+        let line = self.prev.unwrap().0;
+        let else_jump = self.emit_jump(OpCode::JumpIfFalse, line);
+        let end_jump = self.emit_jump(OpCode::Jump, line);
+
+        self.patch_jump(else_jump as usize)?;
+        self.chunk.write(OpCode::Pop, line);
+
+        self.parse_precedence(Precedence::Or)?;
+        self.patch_jump(end_jump as usize)
+    }
+
+    fn expression_stmt(&mut self, line: usize) -> Result<()> {
+        self.expression()?;
+        self.consume_token(TokenType::Semicolon)?;
+        self.chunk.write(OpCode::Pop, line);
         Ok(())
     }
 
@@ -468,7 +511,51 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             }
             Token::Class => todo!(),
             Token::Fun => todo!(),
-            Token::For => todo!(),
+            Token::For => {
+                self.begin_scope();
+                self.advance()?;
+                self.consume_token(TokenType::LeftParen)?;
+                
+                if self.match_token(TokenType::Semicolon)? {
+                    // No initializer
+                } else if self.match_token(TokenType::Var)? {
+                    self.var_dec()?;
+                } else {
+                    self.expression_stmt(self.prev.unwrap().0)?;
+                }
+
+                let mut loop_start = self.chunk.code().len();
+                let mut exit_jump = -1;
+                if !self.match_token(TokenType::Semicolon)? {
+                    self.expression()?;
+                    self.consume_token(TokenType::Semicolon)?;
+                    
+                    let line = self.prev.unwrap().0;
+                    exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
+                    self.chunk.write(OpCode::Pop, line);
+                }
+
+                if !self.match_token(TokenType::RightParen)? {
+                    let body_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
+                    let inc_start = self.chunk.code().len();
+                    self.expression()?;
+                    self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                    self.consume_token(TokenType::RightParen)?;
+
+                    self.emit_loop(loop_start)?;
+                    loop_start = inc_start;
+                    self.patch_jump(body_jump as usize)?;
+                }
+
+                self.statement()?;
+                self.emit_loop(loop_start)?;
+
+                if exit_jump != -1 {
+                    self.patch_jump(exit_jump as usize)?;
+                    self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                }
+                self.end_scope();
+            },
             Token::If => {
                 self.advance()?;
                 self.consume_token(TokenType::LeftParen)?;
@@ -481,13 +568,13 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.statement()?;
                 
                 let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
-                self.patch_jump(then_jump)?;
+                self.patch_jump(then_jump as usize)?;
                 self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
                 if self.match_token(TokenType::Else)? {
                     // Does this get else-if for free? I think it might
                     self.statement()?;
                 }
-                self.patch_jump(else_jump)?;
+                self.patch_jump(else_jump as usize)?;
             },
             Token::Print => {
                 self.advance()?;
@@ -496,12 +583,23 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.chunk.write(OpCode::Print, line);
             }
             Token::Return => todo!(),
-            Token::While => todo!(),
-            _ => {
+            Token::While => {
+                self.advance()?;
+                let loop_start = self.chunk.code().len();
+                self.consume_token(TokenType::LeftParen)?;
                 self.expression()?;
-                self.consume_token(TokenType::Semicolon)?;
+                self.consume_token(TokenType::RightParen)?;
+                let line = self.prev.unwrap().0;
+
+                let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                 self.chunk.write(OpCode::Pop, line);
-            }
+                self.statement()?;
+                self.emit_loop(loop_start)?;
+
+                self.patch_jump(exit_jump as usize)?;
+                self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+            },
+            _ => self.expression_stmt(line)?,
         }
         Ok(())
     }
@@ -600,10 +698,13 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
             while let Some(res) = self.current()
             && ParseRule::<T>::precedence(res?.1) >= precedence {
+                println!("{:?}", self.current());
                 match self.current() {
                     Some(Ok(_)) => {
                         self.advance()?;
-                        ParseRule::infix(self.previous()).expect("should be an infix rule.")(self, can_assign)?;
+                        let infix = ParseRule::infix(self.previous())
+                            .expect("should be an infix rule.");                        
+                        infix(self, can_assign)?;
                         if can_assign && self.match_token(TokenType::Equal)? {
                             return Err(anyhow!("Invalid assignment target"));
                         }

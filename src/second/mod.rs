@@ -293,6 +293,7 @@ impl Vm {
                         self.ip += offset;
                     }
                 }
+                OpCode::Loop => self.ip -= read_i16!(),
                 OpCode::Return => break,
             }
         }
