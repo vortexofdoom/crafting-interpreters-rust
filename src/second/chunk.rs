@@ -27,6 +27,8 @@ pub enum OpCode {
     Not,
     Negate,
     Print,
+    Jump,
+    JumpIfFalse,
     Return,
 }
 
@@ -45,6 +47,11 @@ impl Chunk {
     #[inline]
     pub fn code(&self) -> &[u8] {
         &self.code
+    }
+
+    #[inline]
+    pub fn code_mut(&mut self) -> &mut [u8] {
+        &mut self.code
     }
 
     #[inline]

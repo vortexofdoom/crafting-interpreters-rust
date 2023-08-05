@@ -1,4 +1,4 @@
-use std::{iter::Peekable, ops::Index};
+use std::{iter::Peekable, ops::Index, any};
 
 use anyhow::{anyhow, Result};
 use enum_map::{Enum, EnumMap};
@@ -433,6 +433,27 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
+    fn emit_jump(&mut self, op: OpCode, line: usize) -> usize {
+        self.chunk.write(op, line);
+        self.chunk.write(0xff, line);
+        self.chunk.write(0xff, line);
+        self.chunk.code().len() - 2
+    }
+
+    fn patch_jump(&mut self, offset: usize) -> Result<()> {
+        let code = &mut self.chunk.code_mut();
+        let jump = code.len() - offset - 2;
+
+        if jump > u16::MAX as usize {
+            return Err(anyhow!("Too much code to jump over."));
+        }
+
+        let [hi, lo] = (jump as u16).to_be_bytes();
+        code[offset] = hi;
+        code[offset + 1] = lo;
+        Ok(())
+    }
+
     fn statement(&mut self) -> Result<()> {
         // TODO: fix error propagation
         let Some(Ok((line, token))) = self.current() else {
@@ -448,7 +469,26 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             Token::Class => todo!(),
             Token::Fun => todo!(),
             Token::For => todo!(),
-            Token::If => todo!(),
+            Token::If => {
+                self.advance()?;
+                self.consume_token(TokenType::LeftParen)?;
+                self.expression()?;
+                self.consume_token(TokenType::RightParen)?;
+
+                let then_jump = self.emit_jump(OpCode::JumpIfFalse, self.prev.unwrap().0);
+                self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+
+                self.statement()?;
+                
+                let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
+                self.patch_jump(then_jump)?;
+                self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                if self.match_token(TokenType::Else)? {
+                    // Does this get else-if for free? I think it might
+                    self.statement()?;
+                }
+                self.patch_jump(else_jump)?;
+            },
             Token::Print => {
                 self.advance()?;
                 self.expression()?;

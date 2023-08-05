@@ -31,6 +31,16 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
     }
 }
 
+pub fn jump_inst(chunk: &Chunk, sign: isize, offset: usize) -> usize {
+    let jump = u16::from_be_bytes([chunk.code()[offset + 1], chunk.code()[offset + 2]]) as isize;
+    println!("{:16?} {:4} -> {}", 
+        OpCode::try_from(chunk.code()[offset]).unwrap(),
+        offset,
+        offset as isize + 3 + sign * jump,
+    );
+    offset + 3
+}
+
 pub fn constant_inst(chunk: &Chunk, offset: usize) -> usize {
     let constant = chunk.code()[offset + 1] as usize;
     println!(

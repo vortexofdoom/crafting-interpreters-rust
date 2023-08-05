@@ -203,6 +203,16 @@ impl Vm {
             }};
         }
 
+        macro_rules! read_i16 {
+            () => {{
+                let code = self.chunk.as_ref().unwrap().code();
+                self.ip += 2;
+                let hi = code[self.ip - 2];
+                let lo = code[self.ip - 1];
+                u16::from_be_bytes([hi, lo]) as usize
+            }};
+        }
+
         loop {
             if debug_trace {
                 let chunk = self
@@ -275,6 +285,13 @@ impl Vm {
                 }
                 OpCode::Print => {
                     println!("{}", self.pop());
+                }
+                OpCode::Jump => self.ip += read_i16!(),
+                OpCode::JumpIfFalse => {
+                    let offset = read_i16!();
+                    if !self.peek(0).is_truthy() {
+                        self.ip += offset;
+                    }
                 }
                 OpCode::Return => break,
             }
