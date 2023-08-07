@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod compiler;
 pub mod debug;
+pub mod object;
 pub mod scanner;
 pub mod value;
 
@@ -8,6 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Write},
+    mem::MaybeUninit,
     path::Path,
     ptr::NonNull,
 };
@@ -18,16 +20,17 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    value::{Obj, ObjFunction, ObjString, ObjType, Value},
+    object::{Obj, ObjFunction, ObjString, ObjType},
+    value::Value,
 };
 
 const STACK_MAX: usize = 256;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CallFrame<'a> {
     function: &'a ObjFunction,
     ip: usize,
-    slots: &'a [Value],
+    slots: &'a mut [Value],
 }
 
 #[derive(Debug)]
@@ -45,11 +48,13 @@ impl std::fmt::Display for InterpretError {
     }
 }
 
-pub struct Vm {
-    chunk: Option<Chunk>,
+pub struct Vm<'a> {
+    //chunk: Option<Chunk>,
     stack: [Value; STACK_MAX],
+    frames: [MaybeUninit<CallFrame<'a>>; 64 * 255],
+    frame_count: usize,
     sp: usize,
-    ip: usize,
+    //ip: usize,
     // With the rest of the architecture being what it is, clox's linked list object model was difficult,
     // since the only reliable time to append to the list was on every push, which means double free if not careful
     // Probably worth revisiting for performance, but maybe it's not even that bad, as iteration only has
@@ -58,28 +63,36 @@ pub struct Vm {
     globals: HashMap<Value, Value>,
 }
 
-impl Vm {
-    pub fn init(&mut self) {
-        self.chunk = None;
-        self.stack.fill(Value::Nil);
-        self.sp = 0;
-        self.ip = 0;
-    }
+impl<'a> Vm<'a> {
+    // pub fn init(&mut self) {
+    //     //self.chunk = None;
+    //     self.stack.fill(Value::Nil);
+    //     self.sp = 0;
+    //     self.frame().ip = 0;
+    // }
 
     pub fn new() -> Self {
         Self {
-            chunk: None,
+            //chunk: None,
             stack: [Value::Nil; STACK_MAX],
+            frames: unsafe { MaybeUninit::zeroed().assume_init() },
+            frame_count: 0,
             sp: 0,
-            ip: 0,
             objects: HashSet::new(),
             globals: HashMap::new(),
         }
     }
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
-        self.chunk = Some(compile(source)?);
-        self.ip = 0;
+        //self.chunk = Some(compile(source)?);
+        let func = compile(source)?;
+        let frame = CallFrame {
+            function: &func,
+            ip: 0,
+            slots: &mut self.stack,
+        };
+
+        self.frames[0] = MaybeUninit::new(frame);
         self.run(true)
     }
 
@@ -144,20 +157,22 @@ impl Vm {
 
     #[inline]
     fn read_byte(&mut self) -> u8 {
-        self.ip += 1;
-        self.chunk
-            .as_ref()
-            .expect("only read when initialized")
-            .code()[self.ip - 1]
+        let frame = unsafe { self.frames[self.frame_count - 1].assume_init_mut() };
+        frame.ip += 1;
+        frame.function.chunk.code()[frame.ip - 1]
     }
 
     #[inline]
     fn read_constant(&mut self) -> Value {
         let byte = self.read_byte();
-        self.chunk
-            .as_mut()
-            .expect("only called after initialization")
-            .constants()[byte as usize]
+
+        unsafe {
+            self.frames[self.frame_count - 1]
+                .assume_init_ref()
+                .function
+                .chunk
+                .constants()[byte as usize]
+        }
     }
 
     pub fn run_file(&mut self, path: &str) -> Result<()> {
@@ -190,7 +205,9 @@ impl Vm {
     }
 
     pub fn run(&mut self, debug_trace: bool) -> Result<()> {
-        macro_rules! bin_op {
+        unsafe {
+            let frame = self.frames[self.frame_count - 1].as_mut_ptr();
+            macro_rules! bin_op {
             ($op:tt) => {{
                 let r = self.pop();
                 let l = self.pop();
@@ -198,7 +215,7 @@ impl Vm {
             }};
         }
 
-        macro_rules! compare {
+            macro_rules! compare {
             ($op:tt) => {{
                 let r = self.pop();
                 let l = self.pop();
@@ -206,101 +223,99 @@ impl Vm {
             }};
         }
 
-        macro_rules! read_i16 {
-            () => {{
-                let code = self.chunk.as_ref().unwrap().code();
-                self.ip += 2;
-                let hi = code[self.ip - 2];
-                let lo = code[self.ip - 1];
-                u16::from_be_bytes([hi, lo]) as usize
-            }};
-        }
-
-        loop {
-            if debug_trace {
-                let chunk = self
-                    .chunk
-                    .as_ref()
-                    .expect("only called after initialization");
-                if self.ip >= chunk.code().len() {
-                    break;
-                }
-
-                disassemble_instruction(chunk, self.ip);
+            macro_rules! read_i16 {
+                () => {{
+                    let code = (*frame).function.chunk.code();
+                    (*frame).ip += 2;
+                    let hi = code[(*frame).ip - 2];
+                    let lo = code[(*frame).ip - 1];
+                    u16::from_be_bytes([hi, lo]) as usize
+                }};
             }
 
-            match self.op_from_byte()? {
-                OpCode::Constant => {
-                    let constant = self.read_constant();
-                    self.push(constant);
-                }
-                OpCode::Nil => self.push(Value::Nil),
-                OpCode::True => self.push(Value::Bool(true)),
-                OpCode::False => self.push(Value::Bool(false)),
-                OpCode::Pop => _ = self.pop(),
-                OpCode::GetLocal => {
-                    let slot = self.read_byte();
-                    self.push(self.stack[slot as usize]);
-                }
-                OpCode::GetGlobal => {
-                    let name = self.read_constant();
-                    //println!("{name:?}");
-                    if let Some(value) = self.globals.get(&name) {
-                        self.push(*value);
-                    } else {
-                        return Err(anyhow!(InterpretError::Runtime));
+            loop {
+                if debug_trace {
+                    let chunk = &(*frame).function.chunk;
+                    if (*frame).ip >= chunk.code().len() {
+                        break;
                     }
+
+                    disassemble_instruction(chunk, (*frame).ip);
                 }
-                OpCode::DefineGlobal => {
-                    let name = self.read_constant();
-                    let value = self.peek(0);
-                    self.globals.insert(name, value);
-                    self.pop();
-                }
-                OpCode::SetLocal => {
-                    let slot = self.read_byte();
-                    self.stack[slot as usize] = self.peek(0);
-                }
-                OpCode::SetGlobal => {
-                    let name = self.read_constant();
-                    let value = self.peek(0);
-                    if self.globals.insert(name, value).is_none() {
-                        self.globals.remove(&name);
-                        return Err(anyhow!(InterpretError::Runtime));
+
+                match self.op_from_byte()? {
+                    OpCode::Constant => {
+                        let constant = self.read_constant();
+                        self.push(constant);
                     }
-                }
-                OpCode::Equal => compare!(==),
-                OpCode::Greater => compare!(>),
-                OpCode::GreaterEqual => compare!(>=),
-                OpCode::Less => compare!(<),
-                OpCode::LessEqual => compare!(<=),
-                OpCode::Add => bin_op!(+),
-                OpCode::Subtract => bin_op!(-),
-                OpCode::Multiply => bin_op!(*),
-                OpCode::Divide => bin_op!(/),
-                OpCode::Not => {
-                    let value = !self.pop();
-                    self.push(value);
-                }
-                OpCode::Negate => {
-                    let value = (-self.pop())?;
-                    self.push(value);
-                }
-                OpCode::Print => {
-                    println!("{}", self.pop());
-                }
-                OpCode::Jump => self.ip += read_i16!(),
-                OpCode::JumpIfFalse => {
-                    let offset = read_i16!();
-                    if !self.peek(0).is_truthy() {
-                        self.ip += offset;
+                    OpCode::Nil => self.push(Value::Nil),
+                    OpCode::True => self.push(Value::Bool(true)),
+                    OpCode::False => self.push(Value::Bool(false)),
+                    OpCode::Pop => _ = self.pop(),
+                    OpCode::GetLocal => {
+                        let slot = self.read_byte();
+                        self.push(self.stack[slot as usize]);
                     }
+                    OpCode::GetGlobal => {
+                        let name = self.read_constant();
+                        //println!("{name:?}");
+                        if let Some(value) = self.globals.get(&name) {
+                            self.push(*value);
+                        } else {
+                            return Err(anyhow!(InterpretError::Runtime));
+                        }
+                    }
+                    OpCode::DefineGlobal => {
+                        let name = self.read_constant();
+                        let value = self.peek(0);
+                        self.globals.insert(name, value);
+                        self.pop();
+                    }
+                    OpCode::SetLocal => {
+                        let slot = self.read_byte();
+                        self.stack[slot as usize] = self.peek(0);
+                    }
+                    OpCode::SetGlobal => {
+                        let name = self.read_constant();
+                        let value = self.peek(0);
+                        if self.globals.insert(name, value).is_none() {
+                            self.globals.remove(&name);
+                            return Err(anyhow!(InterpretError::Runtime));
+                        }
+                    }
+                    OpCode::Equal => compare!(==),
+                    OpCode::Greater => compare!(>),
+                    OpCode::GreaterEqual => compare!(>=),
+                    OpCode::Less => compare!(<),
+                    OpCode::LessEqual => compare!(<=),
+                    OpCode::Add => bin_op!(+),
+                    OpCode::Subtract => bin_op!(-),
+                    OpCode::Multiply => bin_op!(*),
+                    OpCode::Divide => bin_op!(/),
+                    OpCode::Not => {
+                        let value = !self.pop();
+                        self.push(value);
+                    }
+                    OpCode::Negate => {
+                        let value = (-self.pop())?;
+                        self.push(value);
+                    }
+                    OpCode::Print => {
+                        println!("{}", self.pop());
+                    }
+                    OpCode::Jump => (*frame).ip += read_i16!(),
+                    OpCode::JumpIfFalse => {
+                        let offset = read_i16!();
+                        if !self.peek(0).is_truthy() {
+                            (*frame).ip += offset;
+                        }
+                    }
+                    OpCode::Loop => (*frame).ip -= read_i16!(),
+                    OpCode::Return => break,
                 }
-                OpCode::Loop => self.ip -= read_i16!(),
-                OpCode::Return => break,
             }
+            Ok(())
         }
-        Ok(())
     }
 }
 
