@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod compiler;
 pub mod debug;
+pub mod object;
 pub mod scanner;
 pub mod value;
 
@@ -18,7 +19,8 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    value::{Obj, ObjFunction, ObjString, ObjType, Value},
+    object::{Obj, ObjFunction, ObjString, ObjType},
+    value::Value,
 };
 
 const STACK_MAX: usize = 256;
