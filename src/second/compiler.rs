@@ -5,6 +5,7 @@ use enum_map::{Enum, EnumMap};
 
 use super::{
     chunk::{Chunk, OpCode},
+    object::{FunctionType, ObjFunction},
     scanner::{scan, Parsed, Token, TokenType},
     value::Value,
     InterpretError,
@@ -54,44 +55,44 @@ struct ParseRule<'a, T: Iterator<Item = Parsed<Token<'a>>>>(
 
 #[rustfmt::skip]
 impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
-    const LEFT_PAREN: Self      = Self(Some(Parser::grouping), None, Precedence::None);
-    const RIGHT_PAREN: Self     = Self(None, None, Precedence::None);
-    const LEFT_BRACE: Self      = Self(None, None, Precedence::None);
-    const RIGHT_BRACE: Self     = Self(None, None, Precedence::None);
-    const COMMA: Self           = Self(None, None, Precedence::None);
-    const DOT: Self             = Self(None, None, Precedence::None);
-    const MINUS: Self           = Self(Some(Parser::unary), Some(Parser::binary), Precedence::Term);
-    const PLUS: Self            = Self(None, Some(Parser::binary), Precedence::Term);
-    const SEMICOLON: Self       = Self(None, None, Precedence::None);
-    const SLASH: Self           = Self(None, Some(Parser::binary), Precedence::Factor);
-    const STAR: Self            = Self(None, Some(Parser::binary), Precedence::Factor);
-    const BANG: Self            = Self(Some(Parser::unary), None, Precedence::None);
-    const BANG_EQUAL: Self      = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const EQUAL: Self           = Self(None, None, Precedence::None);
-    const EQUAL_EQUAL: Self     = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const GREATER: Self         = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const GREATER_EQUAL: Self   = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const LESS: Self            = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const LESS_EQUAL: Self      = Self(None, Some(Parser::binary), Precedence::Comparison);
-    const IDENTIFIER: Self      = Self(Some(Parser::variable), None, Precedence::None);
-    const STRING: Self          = Self(Some(Parser::string), None, Precedence::None);
-    const NUMBER: Self          = Self(Some(Parser::number), None, Precedence::None);
-    const AND: Self             = Self(None, Some(Parser::and), Precedence::And);
-    const CLASS: Self           = Self(None, None, Precedence::None);
-    const ELSE: Self            = Self(None, None, Precedence::None);
-    const FALSE: Self           = Self(Some(Parser::literal), None, Precedence::None);
-    const FOR: Self             = Self(None, None, Precedence::None);
-    const FUN: Self             = Self(None, None, Precedence::None);
-    const IF: Self              = Self(None, None, Precedence::None);
-    const NIL: Self             = Self(Some(Parser::literal), None, Precedence::None);
-    const OR: Self              = Self(None, Some(Parser::or), Precedence::Or);
-    const PRINT: Self           = Self(None, None, Precedence::None);
-    const RETURN: Self          = Self(None, None, Precedence::None);
-    const SUPER: Self           = Self(None, None, Precedence::None);
-    const THIS: Self            = Self(None, None, Precedence::None);
-    const TRUE: Self            = Self(Some(Parser::literal), None, Precedence::None);
-    const VAR: Self             = Self(None, None, Precedence::None);
-    const WHILE: Self           = Self(None, None, Precedence::None);
+    const LEFT_PAREN: Self      = Self(Some(Parser::grouping),  None,                   Precedence::None);
+    const RIGHT_PAREN: Self     = Self(None,                    None,                   Precedence::None);
+    const LEFT_BRACE: Self      = Self(None,                    None,                   Precedence::None);
+    const RIGHT_BRACE: Self     = Self(None,                    None,                   Precedence::None);
+    const COMMA: Self           = Self(None,                    None,                   Precedence::None);
+    const DOT: Self             = Self(None,                    None,                   Precedence::None);
+    const MINUS: Self           = Self(Some(Parser::unary),     Some(Parser::binary),   Precedence::Term);
+    const PLUS: Self            = Self(None,                    Some(Parser::binary),   Precedence::Term);
+    const SEMICOLON: Self       = Self(None,                    None,                   Precedence::None);
+    const SLASH: Self           = Self(None,                    Some(Parser::binary),   Precedence::Factor);
+    const STAR: Self            = Self(None,                    Some(Parser::binary),   Precedence::Factor);
+    const BANG: Self            = Self(Some(Parser::unary),     None,                   Precedence::None);
+    const BANG_EQUAL: Self      = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const EQUAL: Self           = Self(None,                    None,                   Precedence::None);
+    const EQUAL_EQUAL: Self     = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const GREATER: Self         = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const GREATER_EQUAL: Self   = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const LESS: Self            = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const LESS_EQUAL: Self      = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const IDENTIFIER: Self      = Self(Some(Parser::variable),  None,                   Precedence::None);
+    const STRING: Self          = Self(Some(Parser::string),    None,                   Precedence::None);
+    const NUMBER: Self          = Self(Some(Parser::number),    None,                   Precedence::None);
+    const AND: Self             = Self(None,                    Some(Parser::and),      Precedence::And);
+    const CLASS: Self           = Self(None,                    None,                   Precedence::None);
+    const ELSE: Self            = Self(None,                    None,                   Precedence::None);
+    const FALSE: Self           = Self(Some(Parser::literal),   None,                   Precedence::None);
+    const FOR: Self             = Self(None,                    None,                   Precedence::None);
+    const FUN: Self             = Self(None,                    None,                   Precedence::None);
+    const IF: Self              = Self(None,                    None,                   Precedence::None);
+    const NIL: Self             = Self(Some(Parser::literal),   None,                   Precedence::None);
+    const OR: Self              = Self(None,                    Some(Parser::or),       Precedence::Or);
+    const PRINT: Self           = Self(None,                    None,                   Precedence::None);
+    const RETURN: Self          = Self(None,                    None,                   Precedence::None);
+    const SUPER: Self           = Self(None,                    None,                   Precedence::None);
+    const THIS: Self            = Self(None,                    None,                   Precedence::None);
+    const TRUE: Self            = Self(Some(Parser::literal),   None,                   Precedence::None);
+    const VAR: Self             = Self(None,                    None,                   Precedence::None);
+    const WHILE: Self           = Self(None,                    None,                   Precedence::None);
 
     const RULES: [Self; 38] = [
         ParseRule::LEFT_PAREN,
@@ -179,6 +180,8 @@ impl Default for Local<'_> {
 
 #[derive(Debug)]
 struct Compiler<'a> {
+    function: &'a mut ObjFunction,
+    fun_type: FunctionType,
     enclosing: Option<&'a mut Self>,
     locals: [Local<'a>; 256],
     local_count: usize,
@@ -188,8 +191,10 @@ struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     const MAX_LOCALS: usize = 256;
 
-    fn new() -> Self {
+    fn new(function: &'a mut ObjFunction) -> Self {
         Self {
+            function,
+            fun_type: FunctionType::Script,
             enclosing: None,
             locals: [Local::default(); 256],
             local_count: 0,
@@ -197,8 +202,14 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn new_enclosed(enclosing: &'a mut Self) -> Self {
+    fn new_enclosed(
+        enclosing: &'a mut Self,
+        function: &'a mut ObjFunction,
+        fun_type: FunctionType,
+    ) -> Self {
         Self {
+            function,
+            fun_type,
             enclosing: Some(enclosing),
             locals: [Local::default(); 256],
             local_count: 0,
@@ -208,7 +219,6 @@ impl<'a> Compiler<'a> {
 }
 
 struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
-    chunk: Chunk,
     prev: Option<(usize, Token<'a>)>,
     current_compiler: Option<&'a mut Compiler<'a>>,
     tokens: Peekable<T>,
@@ -225,13 +235,15 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     #[inline]
     fn end_scope(&mut self) -> Result<()> {
-        let compiler = self.current_compiler.as_mut().unwrap();
+        let mut compiler = self.current_compiler.as_mut().unwrap();
         compiler.scope_depth -= 1;
 
         while compiler.local_count > 0
             && compiler.locals[compiler.local_count - 1].depth > compiler.scope_depth as isize
         {
-            self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+            self.emit_byte(OpCode::Pop);
+            // reborrowing to make the borrow checker happy
+            compiler = self.current_compiler.as_mut().unwrap();
             compiler.local_count -= 1;
         }
         Ok(())
@@ -258,6 +270,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         } else {
             Ok(false)
         }
+    }
+
+    fn chunk(&mut self) -> &mut Chunk {
+        &mut self.current_compiler.as_mut().unwrap().function.chunk
     }
 
     fn current(&mut self) -> Option<Result<(usize, Token)>> {
@@ -329,7 +345,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         if self.match_token(TokenType::Equal)? {
             self.expression()?;
         } else {
-            self.chunk.write(OpCode::Nil, line);
+            self.chunk().write(OpCode::Nil, line);
         }
         self.consume_token(TokenType::Semicolon)?;
 
@@ -341,8 +357,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         {
             return Ok(());
         }
-        self.chunk.write(OpCode::DefineGlobal, line);
-        self.chunk.write(global, line);
+        self.chunk().write(OpCode::DefineGlobal, line);
+        self.chunk().write(global, line);
         Ok(())
     }
 
@@ -355,7 +371,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
         self.declare_variable()?;
 
-        Ok((self.chunk.add_constant(Value::new_string(s.to_string())), l))
+        Ok((
+            self.chunk().add_constant(Value::new_string(s.to_string())),
+            l,
+        ))
     }
 
     fn declare_variable(&mut self) -> Result<()> {
@@ -418,7 +437,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             (i, OpCode::GetLocal, OpCode::SetLocal)
         } else {
             (
-                self.chunk.add_constant(Value::new_string(name.to_string())),
+                self.chunk()
+                    .add_constant(Value::new_string(name.to_string())),
                 OpCode::GetGlobal,
                 OpCode::SetGlobal,
             )
@@ -426,37 +446,37 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
         if can_assign && self.match_token(TokenType::Equal)? {
             self.expression()?;
-            self.chunk.write(set_op, l);
+            self.chunk().write(set_op, l);
         } else {
-            self.chunk.write(get_op, l);
+            self.chunk().write(get_op, l);
         }
-        self.chunk.write(arg, l);
+        self.chunk().write(arg, l);
         Ok(())
     }
 
     fn emit_jump(&mut self, op: OpCode, line: usize) -> isize {
-        self.chunk.write(op, line);
-        self.chunk.write(0xff, line);
-        self.chunk.write(0xff, line);
-        self.chunk.code().len() as isize - 2
+        self.chunk().write(op, line);
+        self.chunk().write(0xff, line);
+        self.chunk().write(0xff, line);
+        self.chunk().code().len() as isize - 2
     }
 
     fn emit_loop(&mut self, start: usize) -> Result<()> {
         let line = self.prev.unwrap().0;
-        self.chunk.write(OpCode::Loop, line);
-        let offset = self.chunk.code().len() - start + 2;
+        self.chunk().write(OpCode::Loop, line);
+        let offset = self.chunk().code().len() - start + 2;
         if offset > u16::MAX as usize {
             return Err(anyhow!("loop body too large."));
         }
         let hi = ((offset >> 8) & 0xff) as u8;
         let lo = (offset & 0xff) as u8;
-        self.chunk.write(hi, line);
-        self.chunk.write(lo, line);
+        self.chunk().write(hi, line);
+        self.chunk().write(lo, line);
         Ok(())
     }
 
     fn patch_jump(&mut self, offset: usize) -> Result<()> {
-        let code = &mut self.chunk.code_mut();
+        let code = &mut self.chunk().code_mut();
         let jump = code.len() - offset - 2;
 
         if jump > u16::MAX as usize {
@@ -473,7 +493,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         println!("{:?}", self.prev);
         let line = self.prev.unwrap().0;
         let end_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-        self.chunk.write(OpCode::Pop, line);
+        self.chunk().write(OpCode::Pop, line);
         self.parse_precedence(Precedence::And)?;
         self.patch_jump(end_jump as usize)
     }
@@ -485,7 +505,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let end_jump = self.emit_jump(OpCode::Jump, line);
 
         self.patch_jump(else_jump as usize)?;
-        self.chunk.write(OpCode::Pop, line);
+        self.chunk().write(OpCode::Pop, line);
 
         self.parse_precedence(Precedence::Or)?;
         self.patch_jump(end_jump as usize)
@@ -494,8 +514,13 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn expression_stmt(&mut self, line: usize) -> Result<()> {
         self.expression()?;
         self.consume_token(TokenType::Semicolon)?;
-        self.chunk.write(OpCode::Pop, line);
+        self.chunk().write(OpCode::Pop, line);
         Ok(())
+    }
+
+    fn emit_byte<U: Into<u8>>(&mut self, byte: U) {
+        let line = self.prev.unwrap().0;
+        self.chunk().write(byte, line);
     }
 
     fn statement(&mut self) -> Result<()> {
@@ -525,7 +550,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                     self.expression_stmt(self.prev.unwrap().0)?;
                 }
 
-                let mut loop_start = self.chunk.code().len();
+                let mut loop_start = self.chunk().code().len();
                 let mut exit_jump = -1;
                 if !self.match_token(TokenType::Semicolon)? {
                     self.expression()?;
@@ -533,14 +558,14 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
                     let line = self.prev.unwrap().0;
                     exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                    self.chunk.write(OpCode::Pop, line);
+                    self.chunk().write(OpCode::Pop, line);
                 }
 
                 if !self.match_token(TokenType::RightParen)? {
                     let body_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
-                    let inc_start = self.chunk.code().len();
+                    let inc_start = self.chunk().code().len();
                     self.expression()?;
-                    self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                    self.emit_byte(OpCode::Pop);
                     self.consume_token(TokenType::RightParen)?;
 
                     self.emit_loop(loop_start)?;
@@ -553,7 +578,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
                 if exit_jump != -1 {
                     self.patch_jump(exit_jump as usize)?;
-                    self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                    self.emit_byte(OpCode::Pop);
                 }
                 self.end_scope();
             }
@@ -564,13 +589,13 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.consume_token(TokenType::RightParen)?;
 
                 let then_jump = self.emit_jump(OpCode::JumpIfFalse, self.prev.unwrap().0);
-                self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                self.emit_byte(OpCode::Pop);
 
                 self.statement()?;
 
                 let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
                 self.patch_jump(then_jump as usize)?;
-                self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                self.emit_byte(OpCode::Pop);
                 if self.match_token(TokenType::Else)? {
                     // Does this get else-if for free? I think it might
                     self.statement()?;
@@ -581,24 +606,24 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.advance()?;
                 self.expression()?;
                 self.consume_token(TokenType::Semicolon)?;
-                self.chunk.write(OpCode::Print, line);
+                self.chunk().write(OpCode::Print, line);
             }
             Token::Return => todo!(),
             Token::While => {
                 self.advance()?;
-                let loop_start = self.chunk.code().len();
+                let loop_start = self.chunk().code().len();
                 self.consume_token(TokenType::LeftParen)?;
                 self.expression()?;
                 self.consume_token(TokenType::RightParen)?;
                 let line = self.prev.unwrap().0;
 
                 let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                self.chunk.write(OpCode::Pop, line);
+                self.chunk().write(OpCode::Pop, line);
                 self.statement()?;
                 self.emit_loop(loop_start)?;
 
                 self.patch_jump(exit_jump as usize)?;
-                self.chunk.write(OpCode::Pop, self.prev.unwrap().0);
+                self.emit_byte(OpCode::Pop);
             }
             _ => self.expression_stmt(line)?,
         }
@@ -611,9 +636,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             .expect("should only call string when there is a token");
         match token {
             Token::String(s) => {
-                let constant = self.chunk.add_constant(Value::new_string(s.to_string()));
-                self.chunk.write(OpCode::Constant, line);
-                self.chunk.write(constant, line);
+                let constant = self.chunk().add_constant(Value::new_string(s.to_string()));
+                self.chunk().write(OpCode::Constant, line);
+                self.chunk().write(constant, line);
                 Ok(())
             }
             _ => unreachable!(),
@@ -634,7 +659,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             Token::Bang => OpCode::Not,
             _ => return Err(anyhow!("{token} is not a valid unary operator!")),
         };
-        self.chunk.write(op, line);
+        self.chunk().write(op, line);
         Ok(())
     }
 
@@ -644,19 +669,19 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             .expect("should only call binary when there is a token");
         self.parse_precedence(ParseRule::<T>::precedence(token).next_highest())?;
         match token {
-            Token::Minus => self.chunk.write(OpCode::Subtract, line),
-            Token::Plus => self.chunk.write(OpCode::Add, line),
-            Token::Slash => self.chunk.write(OpCode::Divide, line),
-            Token::Star => self.chunk.write(OpCode::Multiply, line),
+            Token::Minus => self.chunk().write(OpCode::Subtract, line),
+            Token::Plus => self.chunk().write(OpCode::Add, line),
+            Token::Slash => self.chunk().write(OpCode::Divide, line),
+            Token::Star => self.chunk().write(OpCode::Multiply, line),
             Token::BangEqual => {
-                self.chunk.write(OpCode::Equal, line);
-                self.chunk.write(OpCode::Not, line);
+                self.chunk().write(OpCode::Equal, line);
+                self.chunk().write(OpCode::Not, line);
             }
-            Token::EqualEqual => self.chunk.write(OpCode::Equal, line),
-            Token::Greater => self.chunk.write(OpCode::Greater, line),
-            Token::GreaterEqual => self.chunk.write(OpCode::GreaterEqual, line),
-            Token::Less => self.chunk.write(OpCode::Less, line),
-            Token::LessEqual => self.chunk.write(OpCode::LessEqual, line),
+            Token::EqualEqual => self.chunk().write(OpCode::Equal, line),
+            Token::Greater => self.chunk().write(OpCode::Greater, line),
+            Token::GreaterEqual => self.chunk().write(OpCode::GreaterEqual, line),
+            Token::Less => self.chunk().write(OpCode::Less, line),
+            Token::LessEqual => self.chunk().write(OpCode::LessEqual, line),
             _ => return Err(anyhow!("{token} is not a valid binary operator!")),
         }
         Ok(())
@@ -666,17 +691,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let (line, Token::Number(n)) = self.prev.expect("only call on numbers") else {
             unreachable!()
         };
-        self.chunk.write(OpCode::Constant, line);
-        let constant = self.chunk.add_constant(Value::Number(n));
-        self.chunk.write(constant, line);
+        self.chunk().write(OpCode::Constant, line);
+        let constant = self.chunk().add_constant(Value::Number(n));
+        self.chunk().write(constant, line);
         Ok(())
     }
 
     fn literal(&mut self, can_assign: bool) -> Result<()> {
         match self.prev {
-            Some((i, Token::False)) => self.chunk.write(OpCode::False, i),
-            Some((i, Token::Nil)) => self.chunk.write(OpCode::Nil, i),
-            Some((i, Token::True)) => self.chunk.write(OpCode::True, i),
+            Some((i, Token::False)) => self.chunk().write(OpCode::False, i),
+            Some((i, Token::Nil)) => self.chunk().write(OpCode::Nil, i),
+            Some((i, Token::True)) => self.chunk().write(OpCode::True, i),
             _ => unreachable!(),
         }
         Ok(())
@@ -719,28 +744,29 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 }
 
-pub fn compile(source: &str) -> Result<Chunk> {
-    // for token in scan(source) {
-    //     println!("Token: {token}");
-    // }
-
-    let mut compiler = Compiler::new();
-
+fn parse<'a>(source: &'a str, compiler: &'a mut Compiler<'a>) {
     let mut parser = Parser {
-        chunk: Chunk::new(),
         prev: None,
-        current_compiler: Some(&mut compiler),
+        current_compiler: Some(compiler),
         tokens: scan(source),
     };
 
-    loop {
+    while parser.tokens.peek().is_some() {
         if let Err(e) = parser.declaration() {
             parser.synchronize();
             println!("{e}");
         }
-        if parser.tokens.peek().is_none() {
-            break;
-        }
     }
-    Ok(parser.chunk)
+}
+
+pub fn compile(source: &str) -> Result<ObjFunction> {
+    // for token in scan(source) {
+    //     println!("Token: {token}");
+    // }
+    let mut function = ObjFunction::new();
+    let mut compiler = Compiler::new(&mut function);
+
+    parse(source, &mut compiler);
+
+    return Ok(function);
 }
