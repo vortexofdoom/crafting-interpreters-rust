@@ -24,13 +24,38 @@ use self::{
     value::Value,
 };
 
-const STACK_MAX: usize = 256;
+const STACK_MAX: usize = FRAMES_MAX * 256;
+const FRAMES_MAX: usize = 64;
 
-#[derive(Debug)]
-struct CallFrame<'a> {
-    function: &'a ObjFunction,
-    ip: usize,
-    slots: &'a mut [Value],
+#[derive(Debug, Clone, Copy)]
+struct CallFrame {
+    function: NonNull<ObjFunction>,
+    ip: *const u8,
+    slots: *mut Value,
+}
+
+impl CallFrame {
+    #[inline]
+    fn read_byte(&mut self) -> u8 {
+        unsafe {
+            let byte = *self.ip;
+            self.ip = self.ip.add(1);
+            byte
+        }
+    }
+
+    #[inline]
+    fn read_constant(&mut self) -> Value {
+        unsafe {
+            let i = self.read_byte() as usize;
+            (*self.function.as_ptr()).chunk.constants()[i]
+        }
+    }
+
+    #[inline]
+    fn op_from_byte(&mut self) -> Result<OpCode> {
+        OpCode::try_from(self.read_byte()).map_err(|_| anyhow!(InterpretError::Runtime))
+    }
 }
 
 #[derive(Debug)]
@@ -48,12 +73,13 @@ impl std::fmt::Display for InterpretError {
     }
 }
 
-pub struct Vm<'a> {
+pub struct Vm {
     //chunk: Option<Chunk>,
-    stack: [Value; STACK_MAX],
-    frames: [MaybeUninit<CallFrame<'a>>; 64 * 255],
+    frames: [MaybeUninit<CallFrame>; FRAMES_MAX],
     frame_count: usize,
+    stack: [Value; STACK_MAX],
     sp: usize,
+    //sp: usize,
     //ip: usize,
     // With the rest of the architecture being what it is, clox's linked list object model was difficult,
     // since the only reliable time to append to the list was on every push, which means double free if not careful
@@ -63,41 +89,57 @@ pub struct Vm<'a> {
     globals: HashMap<Value, Value>,
 }
 
-impl<'a> Vm<'a> {
-    // pub fn init(&mut self) {
-    //     //self.chunk = None;
-    //     self.stack.fill(Value::Nil);
-    //     self.sp = 0;
-    //     self.frame().ip = 0;
-    // }
+impl Vm {
+    pub fn init(&mut self) {
+        //self.chunk = None;
+        self.stack.fill(Value::Nil);
+        self.sp = 0;
+        self.free_objects();
+        self.globals.clear();
+        //self.ip = 0;
+    }
+
+    pub fn new_frame(&mut self, function: NonNull<ObjFunction>) {
+        unsafe {
+            let frame = CallFrame {
+                function,
+                ip: (*function.as_ptr()).chunk.code().as_ptr(),
+                slots: self.stack.split_at_mut(self.sp).1.as_mut_ptr(),
+            };
+        }
+    }
 
     pub fn new() -> Self {
         Self {
             //chunk: None,
-            stack: [Value::Nil; STACK_MAX],
-            frames: unsafe { MaybeUninit::zeroed().assume_init() },
+            frames: [MaybeUninit::uninit(); FRAMES_MAX],
             frame_count: 0,
+            stack: [Value::Nil; STACK_MAX],
             sp: 0,
+            //ip: 0,
             objects: HashSet::new(),
             globals: HashMap::new(),
         }
     }
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
-        //self.chunk = Some(compile(source)?);
-        let func = compile(source)?;
-        let frame = CallFrame {
-            function: &func,
-            ip: 0,
-            slots: &mut self.stack,
+        self.init();
+        let mut function = compile(source)?;
+        let ip = function.chunk.code().as_ptr();
+        let mut frame = CallFrame {
+            function: NonNull::new(&mut function as *mut ObjFunction).unwrap(),
+            ip,
+            slots: self.stack.split_at_mut(self.sp).1.as_mut_ptr(),
         };
+        self.frames[self.frame_count] = MaybeUninit::new(frame);
+        self.frame_count += 1;
 
-        self.frames[0] = MaybeUninit::new(frame);
         self.run(true)
     }
 
     #[inline]
     fn push(&mut self, value: Value) {
+        // SAFETY: the stack pointer is defined in terms of the stack, and we check bounds at compile time
         //println!("pushing {value}, sp: {}", self.sp);
         self.stack[self.sp] = value;
         self.sp += 1;
@@ -114,6 +156,11 @@ impl<'a> Vm<'a> {
 
     #[inline]
     fn pop(&mut self) -> Value {
+        // unsafe {
+        //     let value = *self.sp;
+        //     self.sp.sub(1);
+        //     value
+        // }
         self.sp -= 1;
         //println!("popping {}, sp: {}", self.stack[self.sp], self.sp);
         self.stack[self.sp]
@@ -121,6 +168,7 @@ impl<'a> Vm<'a> {
 
     #[inline]
     fn peek(&self, dist: usize) -> Value {
+        //unsafe { *self.sp.sub(1 + dist) }
         self.stack[self.sp - 1 - dist]
     }
 
@@ -128,8 +176,8 @@ impl<'a> Vm<'a> {
         for obj in (&mut self.objects).iter() {
             unsafe {
                 match (*(*obj)).kind {
-                    ObjType::String => Box::from_raw(obj.cast::<ObjString>()),
-                    ObjType::Function => todo!(),
+                    ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
+                    ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
                 };
             }
         }
@@ -148,31 +196,6 @@ impl<'a> Vm<'a> {
     fn reset_stack(&mut self) {
         self.stack.fill(Value::Nil);
         self.sp = 0;
-    }
-
-    #[inline]
-    fn op_from_byte(&mut self) -> Result<OpCode> {
-        OpCode::try_from(self.read_byte()).map_err(|_| anyhow!(InterpretError::Runtime))
-    }
-
-    #[inline]
-    fn read_byte(&mut self) -> u8 {
-        let frame = unsafe { self.frames[self.frame_count - 1].assume_init_mut() };
-        frame.ip += 1;
-        frame.function.chunk.code()[frame.ip - 1]
-    }
-
-    #[inline]
-    fn read_constant(&mut self) -> Value {
-        let byte = self.read_byte();
-
-        unsafe {
-            self.frames[self.frame_count - 1]
-                .assume_init_ref()
-                .function
-                .chunk
-                .constants()[byte as usize]
-        }
     }
 
     pub fn run_file(&mut self, path: &str) -> Result<()> {
@@ -206,58 +229,74 @@ impl<'a> Vm<'a> {
 
     pub fn run(&mut self, debug_trace: bool) -> Result<()> {
         unsafe {
-            let frame = self.frames[self.frame_count - 1].as_mut_ptr();
+            let mut frame = self.frames[self.frame_count - 1].assume_init();
+
+            macro_rules! read_byte {
+                () => {
+                    unsafe {
+                        let byte = *frame.ip;
+                        frame.ip = frame.ip.add(1);
+                        byte
+                    }
+                };
+            }
+
+            macro_rules! read_constant {
+                () => {{
+                    let i = read_byte!() as usize;
+                    (*frame.function.as_ptr()).chunk.constants()[i]
+                }};
+            }
+
             macro_rules! bin_op {
-            ($op:tt) => {{
-                let r = self.pop();
-                let l = self.pop();
-                self.push((l $op r)?);
-            }};
-        }
+                ($op:tt) => {{
+                    let r = self.pop();
+                    let l = self.pop();
+                    self.push((l $op r)?);
+                }};
+            }
 
             macro_rules! compare {
-            ($op:tt) => {{
-                let r = self.pop();
-                let l = self.pop();
-                self.push(Value::Bool(l $op r));
-            }};
-        }
+                ($op:tt) => {{
+                    let r = self.pop();
+                    let l = self.pop();
+                    self.push(Value::Bool(l $op r));
+                }};
+            }
 
             macro_rules! read_i16 {
                 () => {{
-                    let code = (*frame).function.chunk.code();
-                    (*frame).ip += 2;
-                    let hi = code[(*frame).ip - 2];
-                    let lo = code[(*frame).ip - 1];
-                    u16::from_be_bytes([hi, lo]) as usize
+                    frame.ip = frame.ip.add(2);
+                    let hi = *frame.ip.offset(-2);
+                    let lo = *frame.ip.offset(-1);
+                    u16::from_be_bytes([hi, lo])
                 }};
             }
 
             loop {
                 if debug_trace {
-                    let chunk = &(*frame).function.chunk;
-                    if (*frame).ip >= chunk.code().len() {
+                    let chunk = &(*frame.function.as_ptr()).chunk;
+                    let code = chunk.code();
+                    let offset = frame.ip.offset_from(code.as_ptr()) as usize;
+                    if offset >= code.len() {
                         break;
                     }
 
-                    disassemble_instruction(chunk, (*frame).ip);
+                    disassemble_instruction(chunk, offset);
                 }
 
-                match self.op_from_byte()? {
-                    OpCode::Constant => {
-                        let constant = self.read_constant();
-                        self.push(constant);
-                    }
+                match frame.op_from_byte()? {
+                    OpCode::Constant => self.push(read_constant!()),
                     OpCode::Nil => self.push(Value::Nil),
                     OpCode::True => self.push(Value::Bool(true)),
                     OpCode::False => self.push(Value::Bool(false)),
                     OpCode::Pop => _ = self.pop(),
                     OpCode::GetLocal => {
-                        let slot = self.read_byte();
-                        self.push(self.stack[slot as usize]);
+                        let slot = frame.read_byte();
+                        self.push(*frame.slots.offset(slot as isize));
                     }
                     OpCode::GetGlobal => {
-                        let name = self.read_constant();
+                        let name = read_constant!();
                         //println!("{name:?}");
                         if let Some(value) = self.globals.get(&name) {
                             self.push(*value);
@@ -266,17 +305,17 @@ impl<'a> Vm<'a> {
                         }
                     }
                     OpCode::DefineGlobal => {
-                        let name = self.read_constant();
+                        let name = read_constant!();
                         let value = self.peek(0);
                         self.globals.insert(name, value);
                         self.pop();
                     }
                     OpCode::SetLocal => {
-                        let slot = self.read_byte();
-                        self.stack[slot as usize] = self.peek(0);
+                        let slot = read_byte!();
+                        *frame.slots.offset(slot as isize) = self.peek(0);
                     }
                     OpCode::SetGlobal => {
-                        let name = self.read_constant();
+                        let name = read_constant!();
                         let value = self.peek(0);
                         if self.globals.insert(name, value).is_none() {
                             self.globals.remove(&name);
@@ -303,14 +342,13 @@ impl<'a> Vm<'a> {
                     OpCode::Print => {
                         println!("{}", self.pop());
                     }
-                    OpCode::Jump => (*frame).ip += read_i16!(),
+                    OpCode::Jump => frame.ip = frame.ip.add(read_i16!() as usize),
                     OpCode::JumpIfFalse => {
-                        let offset = read_i16!();
                         if !self.peek(0).is_truthy() {
-                            (*frame).ip += offset;
+                            frame.ip = frame.ip.add(read_i16!() as usize);
                         }
                     }
-                    OpCode::Loop => (*frame).ip -= read_i16!(),
+                    OpCode::Loop => frame.ip = frame.ip.sub(read_i16!() as usize),
                     OpCode::Return => break,
                 }
             }

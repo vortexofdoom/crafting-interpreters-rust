@@ -30,7 +30,10 @@ impl Obj {
     }
 
     fn function() -> Self {
-        todo!()
+        Self {
+            kind: ObjType::Function,
+            next: None
+        }
     }
 
     pub fn set_next(&mut self, next: Option<NonNull<Self>>) {
