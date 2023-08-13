@@ -32,7 +32,7 @@ impl Obj {
     fn function() -> Self {
         Self {
             kind: ObjType::Function,
-            next: None,
+            next: None
         }
     }
 
@@ -104,12 +104,15 @@ pub struct ObjFunction {
     pub obj: Obj,
     pub arity: u8,
     pub chunk: Chunk,
-    pub name: Value,
+    pub name: Option<String>,
 }
 
 impl std::fmt::Display for ObjFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<fn {}>", self.name)
+        match &self.name {
+            Some(name) => write!(f, "<fn {}>", name),
+            None => write!(f, "<fn>"),
+        }
     }
 }
 
@@ -128,7 +131,7 @@ impl ObjFunction {
             },
             arity: 0,
             chunk: Chunk::new(),
-            name: Value::Nil,
+            name: None,
         }
     }
 }

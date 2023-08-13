@@ -4,7 +4,7 @@ use std::iter::Peekable;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
-pub enum Token<'a> {
+pub enum Token {
     // Single-character tokens
     LeftParen,
     RightParen,
@@ -27,8 +27,8 @@ pub enum Token<'a> {
     Less,
     LessEqual,
     // Literals
-    Identifier(&'a str),
-    String(&'a str),
+    Identifier(&'static str),
+    String(&'static str),
     Number(f64),
     // Keywords
     And,
@@ -75,7 +75,7 @@ pub enum TokenType {
     LessEqual,
     // Literals
     Identifier,
-    String,
+    Strng,
     Number,
     // Keywords
     And,
@@ -96,8 +96,8 @@ pub enum TokenType {
     While,
 }
 
-impl From<Token<'_>> for TokenType {
-    fn from(value: Token<'_>) -> Self {
+impl From<Token> for TokenType {
+    fn from(value: Token) -> Self {
         match value {
             Token::LeftParen => Self::LeftParen,
             Token::RightParen => Self::RightParen,
@@ -119,7 +119,7 @@ impl From<Token<'_>> for TokenType {
             Token::Less => Self::Less,
             Token::LessEqual => Self::LessEqual,
             Token::Identifier(_) => Self::Identifier,
-            Token::String(_) => Self::String,
+            Token::String(_) => Self::Strng,
             Token::Number(_) => Self::Number,
             Token::And => Self::And,
             Token::Class => Self::Class,
@@ -164,7 +164,7 @@ impl std::fmt::Display for TokenType {
             TokenType::Less => "<",
             TokenType::LessEqual => "<=",
             TokenType::Identifier => "identifier",
-            TokenType::String => "string",
+            TokenType::Strng => "string",
             TokenType::Number => "number",
             TokenType::And => "and",
             TokenType::Class => "class",
@@ -188,20 +188,20 @@ impl std::fmt::Display for TokenType {
     }
 }
 
-impl PartialEq<Token<'_>> for Token<'_> {
+impl PartialEq<Token> for Token {
     fn eq(&self, other: &Token) -> bool {
         core::mem::discriminant(self) == core::mem::discriminant(other)
     }
 }
 
-impl PartialEq<TokenType> for Token<'_> {
+impl PartialEq<TokenType> for Token {
     fn eq(&self, other: &TokenType) -> bool {
         let token_type = TokenType::from(*self);
         token_type == *other
     }
 }
 
-impl<'a> Token<'a> {
+impl<'a> Token {
     fn from_char(c: char) -> Option<Self> {
         match c {
             '(' => Some(Self::LeftParen),
@@ -219,7 +219,7 @@ impl<'a> Token<'a> {
         }
     }
 
-    fn from_str(source: &'a str) -> Self {
+    fn from_str(source: &'static str) -> Self {
         let check = |s: &str| source.len() == s.len() + 1 && &source[1..] == s;
         let mut chars = source.bytes();
         match chars.next().unwrap() as char {
@@ -244,7 +244,7 @@ impl<'a> Token<'a> {
     }
 }
 
-impl std::fmt::Display for Token<'_> {
+impl std::fmt::Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // TODO: DELET THIS
         //write!(f, "{:?}: ", std::mem::discriminant(self));
@@ -338,7 +338,7 @@ where
     }
 }
 
-pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
+pub fn scan(source: &'static str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
     source
         .lines()
         .enumerate()
@@ -346,16 +346,16 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
         .peekable()
 }
 
-struct LineScanner<'a> {
-    line: &'a str,
+struct LineScanner {
+    line: &'static str,
     curr_byte: usize,
 }
 
-impl<'a> Iterator for LineScanner<'a> {
-    type Item = (usize, Result<Token<'a>>);
+impl Iterator for LineScanner {
+    type Item = (usize, Result<Token>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let pack = |i, t: Token<'a>| Some((i, Ok(t)));
+        let pack = |i, t: Token| Some((i, Ok(t)));
 
         //let chars = self.source.as_bytes()[self.curr..].iter().map(|b| *b as char);
         let c = self.advance()?;
@@ -397,15 +397,15 @@ impl<'a> Iterator for LineScanner<'a> {
     }
 }
 
-fn scan_line(source: &str) -> LineScanner {
+fn scan_line(source: &'static str) -> LineScanner {
     LineScanner {
         line: source,
         curr_byte: 0,
     }
 }
 
-impl<'a> LineScanner<'a> {
-    pub fn init(source: &'a str) -> Self {
+impl LineScanner{
+    pub fn init(source: &'static str) -> Self {
         Self {
             line: source,
             curr_byte: 0,
@@ -434,7 +434,7 @@ impl<'a> LineScanner<'a> {
         self.curr_byte >= self.line.len()
     }
 
-    fn consume_if_eq(&mut self, token: Token<'a>) -> Token<'a> {
+    fn consume_if_eq(&mut self, token: Token) -> Token {
         if self.peek() == Some('=') {
             self.advance();
             match token {
@@ -449,7 +449,7 @@ impl<'a> LineScanner<'a> {
         }
     }
 
-    fn parse_number(&mut self) -> Result<Token<'a>> {
+    fn parse_number(&mut self) -> Result<Token> {
         let start = self.curr_byte - 1;
 
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
@@ -476,7 +476,7 @@ impl<'a> LineScanner<'a> {
     // Parses a string of characters that can begin with a letter or '_', and determines whether it is an keyword or an identifier
     // Returns a `Token` as this will always be valid, since we start with one valid character (which is a valid identifier alone) and stop at the first invalid character
     // validating the identifier itself comes in the next pass.
-    fn parse_word(&mut self) -> Token<'a> {
+    fn parse_word(&mut self) -> Token {
         let start = self.curr_byte - 1;
         while self
             .peek()

@@ -46,6 +46,13 @@ impl Value {
             .cast();
         Self::Obj(ptr)
     }
+
+    pub fn new_function(function: ObjFunction) -> Self {
+        let ptr = NonNull::new(Box::into_raw(Box::new(function)))
+            .expect("function was passed in")
+            .cast();
+        Self::Obj(ptr)
+    }
 }
 
 impl std::fmt::Display for Value {

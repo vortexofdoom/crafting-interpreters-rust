@@ -86,7 +86,7 @@ pub struct Vm {
     // Probably worth revisiting for performance, but maybe it's not even that bad, as iteration only has
     // a little more overhead, and the same amount of pointer indirection?
     objects: HashSet<*mut Obj>,
-    globals: HashMap<Value, Value>,
+    globals: HashMap<NonNull<ObjString>, Value>,
 }
 
 impl Vm {
@@ -125,8 +125,7 @@ impl Vm {
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
         let mut function = compile(source)?;
-        let ip = function.chunk.code().as_ptr();
-        self.new_frame(NonNull::new(&mut function as *mut ObjFunction).unwrap());
+        self.new_frame(function);
         self.run(true)
     }
 
@@ -283,20 +282,17 @@ impl Vm {
                         self.push(self.stack[frame.starting_slot + slot as usize]);
                     }
                     OpCode::GetGlobal => {
-                        let name = read_constant!();
-                        println!("{:?}", self.globals);
-                        //println!("{name:?}");
-                        if let Some(value) = self.globals.get(&name) {
+                        let Value::Obj(name) = read_constant!() else { unreachable!() };
+                        if let Some(value) = self.globals.get(&name.cast()) {
                             self.push(*value);
                         } else {
                             return Err(anyhow!(InterpretError::Runtime));
                         }
                     }
                     OpCode::DefineGlobal => {
-                        let name = read_constant!();
+                        let Value::Obj(name) = read_constant!() else { unreachable!() };
                         let value = self.peek(0);
-                        self.globals.insert(name, value);
-                        println!("{:?}", self.globals);
+                        self.globals.insert(name.cast(), value);
                         self.pop();
                     }
                     OpCode::SetLocal => {
@@ -304,10 +300,10 @@ impl Vm {
                         self.stack[frame.starting_slot + slot as usize] = self.peek(0);
                     }
                     OpCode::SetGlobal => {
-                        let name = read_constant!();
+                        let Value::Obj(name) = read_constant!() else { unreachable!() };
                         let value = self.peek(0);
-                        if self.globals.insert(name, value).is_none() {
-                            self.globals.remove(&name);
+                        if self.globals.insert(name.cast(), value).is_none() {
+                            self.globals.remove(&name.cast());
                             return Err(anyhow!(InterpretError::Runtime));
                         }
                     }
