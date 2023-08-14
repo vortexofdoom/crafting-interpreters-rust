@@ -1,4 +1,9 @@
-use std::{hash::Hash, ops::Deref, ptr::NonNull, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    hash::Hash,
+    ops::Deref,
+    ptr::NonNull,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{anyhow, Result};
 
@@ -47,7 +52,7 @@ impl Value {
         Self::Obj(ptr)
     }
 
-    pub fn clock(args: &[Self]) -> Self {
+    pub fn clock(args: Option<&[Self]>) -> Self {
         Self::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0)
     }
 }
@@ -63,6 +68,7 @@ impl std::fmt::Display for Value {
                 match o.as_ref().kind {
                     ObjType::String => write!(f, "{}", o.cast::<ObjString>().as_ref()),
                     ObjType::Function => write!(f, "{}", o.cast::<ObjFunction>().as_ref()),
+                    ObjType::Native => write!(f, "<native fn>"),
                     _ => unreachable!(),
                 }
             },
@@ -161,7 +167,7 @@ impl std::cmp::PartialEq for Value {
                         }
                         ObjType::Function => {
                             l.cast::<ObjFunction>().as_ref() == r.cast::<ObjFunction>().as_ref()
-                        },
+                        }
                         ObjType::Native => todo!(),
                     }
             },

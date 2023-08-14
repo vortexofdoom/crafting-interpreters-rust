@@ -6,7 +6,10 @@ use enum_map::{Enum, EnumMap};
 use super::{
     chunk::{Chunk, OpCode},
     object::{FunctionType, ObjFunction},
-    scanner::{scan, Parsed, Token, TokenType::{self, *}},
+    scanner::{
+        scan, Parsed, Token,
+        TokenType::{self, *},
+    },
     value::Value,
     InterpretError,
 };
@@ -201,18 +204,12 @@ impl<'a> Compiler<'a> {
             scope_depth: 0,
         };
 
-        compiler.locals[0] = Local {
-            name: "",
-            depth: 0,
-        };
+        compiler.locals[0] = Local { name: "", depth: 0 };
 
         compiler
     }
 
-    fn new_enclosed(
-        enclosing: NonNull<Self>,
-        fun_type: FunctionType,
-    ) -> Self {
+    fn new_enclosed(enclosing: NonNull<Self>, fun_type: FunctionType) -> Self {
         let mut compiler = Self {
             function: NonNull::new(Box::into_raw(Box::new(ObjFunction::new()))).unwrap(),
             fun_type,
@@ -222,18 +219,13 @@ impl<'a> Compiler<'a> {
             scope_depth: 0,
         };
 
-        compiler.locals[0] = Local {
-            name: "",
-            depth: 0,
-        };
+        compiler.locals[0] = Local { name: "", depth: 0 };
 
         compiler
     }
 
     fn function(&mut self) -> &mut ObjFunction {
-        unsafe {
-            self.function.as_mut()
-        }
+        unsafe { self.function.as_mut() }
     }
 }
 
@@ -247,11 +239,9 @@ struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
 impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     #[inline]
     fn scope_depth(&self) -> usize {
-        unsafe {
-            self.current_compiler.as_ref().scope_depth
-        }
+        unsafe { self.current_compiler.as_ref().scope_depth }
     }
-    
+
     #[inline]
     fn begin_scope(&mut self) {
         unsafe {
@@ -263,15 +253,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn end_scope(&mut self) -> Result<()> {
         unsafe {
             let mut compiler = self.current_compiler.as_ptr();
-            
+
             (*compiler).scope_depth -= 1;
-            
+
             while (*compiler).local_count > 0
-            && (*compiler).locals[(*compiler).local_count - 1].depth > (*compiler).scope_depth as isize
+                && (*compiler).locals[(*compiler).local_count - 1].depth
+                    > (*compiler).scope_depth as isize
             {
                 self.emit_byte(OpCode::Pop);
                 // reborrowing to make the borrow checker happy
-                (*compiler).local_count.saturating_sub(1);
+                (*compiler).local_count = (*compiler).local_count.saturating_sub(1);
             }
             Ok(())
         }
@@ -301,9 +292,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
     #[inline]
     fn chunk(&mut self) -> &mut Chunk {
-        unsafe {
-            &mut self.current_compiler.as_mut().function().chunk
-        }
+        unsafe { &mut self.current_compiler.as_mut().function().chunk }
     }
 
     fn current(&mut self) -> Option<Result<(usize, Token)>> {
@@ -395,7 +384,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn end_compiler(&mut self) -> Result<NonNull<ObjFunction>> {
         self.emit_return();
         unsafe {
-        let function = self.current_compiler.as_ref().function;
+            let function = self.current_compiler.as_ref().function;
             self.current_compiler = self.current_compiler.as_ref().enclosing.unwrap();
             Ok(function)
         }
@@ -404,11 +393,28 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn function(&mut self, fun_type: FunctionType) -> Result<()> {
         let enclosing = self.current_compiler;
         let mut compiler = Compiler::new_enclosed(enclosing, fun_type);
-        let Some((_, Token::Identifier(name))) = self.prev else { unreachable!() };
+        let Some((_, Token::Identifier(name))) = self.prev else {
+            unreachable!()
+        };
         compiler.function().name = Some(std::string::String::from(name));
         self.current_compiler = NonNull::new(&mut compiler as *mut Compiler).unwrap();
         self.begin_scope();
         self.consume_token(LeftParen)?;
+        if self.tokens.peek().is_some_and(|t| *t != RightParen) {
+            loop {
+                let overflow;
+                (compiler.function().arity, overflow) =
+                    compiler.function().arity.overflowing_add(1);
+                if overflow {
+                    return Err(anyhow!("Can't have more than 255 parameters."));
+                }
+                let constant = self.parse_variable()?;
+                self.define_variable(constant.0)?;
+                if !self.match_token(Comma)? {
+                    break;
+                }
+            }
+        }
         self.consume_token(RightParen)?;
         self.consume_token(LeftBrace)?;
         self.block()?;
@@ -444,10 +450,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.declare_variable()?;
         let string = s.to_string();
 
-        Ok((
-            self.chunk().add_constant(Value::new_string(string)),
-            l,
-        ))
+        Ok((self.chunk().add_constant(Value::new_string(string)), l))
     }
 
     fn mark_initialized(&mut self) -> Result<()> {
@@ -470,7 +473,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             Some((_, Token::Identifier(name))) => {
                 let compiler = unsafe { self.current_compiler.as_mut() };
                 for i in (0..compiler.local_count).rev() {
-                    println!("{}", compiler.local_count);
                     let local = compiler.locals[i];
                     if local.depth != -1 && local.depth < compiler.scope_depth as isize {
                         break;
@@ -513,7 +515,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             if local.depth == -1 {
                 return Err(anyhow!("Can't read local variable in its own initializer."));
             }
-            if compiler.locals[i].name == name {
+            if local.name == name {
                 return Ok(Some(i as u8));
             }
         }
@@ -560,6 +562,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         if offset > u16::MAX as usize {
             return Err(anyhow!("loop body too large."));
         }
+        //let [lo, hi] = (offset as u16).to_le_bytes();
         let hi = ((offset >> 8) & 0xff) as u8;
         let lo = (offset & 0xff) as u8;
         self.chunk().write(hi, line);
@@ -574,15 +577,14 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         if jump > u16::MAX as usize {
             return Err(anyhow!("Too much code to jump over."));
         }
-
-        let [hi, lo] = (jump as u16).to_be_bytes();
+        let hi = ((jump >> 8) & 0xff) as u8;
+        let lo = (jump & 0xff) as u8;
         code[offset] = hi;
         code[offset + 1] = lo;
         Ok(())
     }
 
     fn and(&mut self, can_assign: bool) -> Result<()> {
-        println!("{:?}", self.prev);
         let line = self.prev.unwrap().0;
         let end_jump = self.emit_jump(OpCode::JumpIfFalse, line);
         self.chunk().write(OpCode::Pop, line);
@@ -591,7 +593,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn or(&mut self, can_assign: bool) -> Result<()> {
-        println!("called or {:?}", self.prev);
         let line = self.prev.unwrap().0;
         let else_jump = self.emit_jump(OpCode::JumpIfFalse, line);
         let end_jump = self.emit_jump(OpCode::Jump, line);
@@ -708,7 +709,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                     self.consume_token(Semicolon)?;
                     self.emit_byte(OpCode::Return);
                 }
-            },
+            }
             Token::While => {
                 self.advance()?;
                 let loop_start = self.chunk().code().len();
@@ -758,15 +759,19 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn argument_list(&mut self) -> Result<u8> {
         let mut arg_count = 0;
-        while !self.match_token(RightParen)? {
-            self.expression()?;
-            arg_count += 1;
-            if arg_count == 255 {
-                return Err(anyhow!("can't have more than 255 arguments"));
+        if !self.tokens.peek().is_some_and(|t| *t == RightParen) {
+            loop {
+                self.expression()?;
+                if arg_count == 255 {
+                    return Err(anyhow!("can't have more than 255 arguments"));
+                }
+                arg_count += 1;
+                if !self.match_token(Comma)? {
+                    break;
+                }
             }
-            self.match_token(Comma)?;
         }
-
+        self.consume_token(RightParen)?;
         Ok(arg_count)
     }
 
@@ -845,7 +850,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
             while let Some(res) = self.current()
             && ParseRule::<T>::precedence(res?.1) >= precedence {
-                println!("{:?}", self.current());
                 match self.current() {
                     Some(Ok(_)) => {
                         self.advance()?;

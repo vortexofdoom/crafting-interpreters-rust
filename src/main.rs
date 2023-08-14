@@ -17,7 +17,6 @@ pub struct LoxArgs {
 fn main() -> Result<()> {
     let args = LoxArgs::parse();
     let mut vm = Vm::new();
-    vm.init();
     if let Some(p) = args.path {
         vm.run_file(&p)?;
     } else {

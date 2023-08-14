@@ -20,7 +20,7 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    object::{Obj, ObjFunction, ObjString, ObjType, ObjNative},
+    object::{Obj, ObjFunction, ObjNative, ObjString, ObjType},
     value::Value,
 };
 
@@ -36,7 +36,11 @@ struct CallFrame {
 
 impl Default for CallFrame {
     fn default() -> Self {
-        Self { function: std::ptr::null(), ip: std::ptr::null(), starting_slot: Default::default() }
+        Self {
+            function: std::ptr::null(),
+            ip: std::ptr::null(),
+            starting_slot: Default::default(),
+        }
     }
 }
 
@@ -96,45 +100,30 @@ pub struct Vm {
 }
 
 impl Vm {
-    pub fn init(&mut self) {
-        self.stack.fill(Value::Nil);
-        self.sp = 1;
-        self.free_objects();
-        self.globals.clear();
-    }
-
-    pub fn call(&mut self, function: NonNull<ObjFunction>, arg_count: u8) -> Result<()> {
-        unsafe {
-            if (*function.as_ptr()).arity != arg_count {
-                return Err(anyhow!("Expected {} arguments, but found {}.", (*function.as_ptr()).arity, arg_count));
-            }
-
-            if self.frame_count == FRAMES_MAX {
-                // TODO: print stack trace
-                return Err(anyhow!("Stack overflow."));
-            }
-
-            let frame = CallFrame {
-                function: function.as_ptr() as *const ObjFunction,
-                ip: (*function.as_ptr()).chunk.code().as_ptr(),
-                starting_slot: (self.sp - arg_count as usize).saturating_sub(1),
-            };
-
-            self.frames[self.frame_count] = frame;
-            self.frame_count += 1;
-        }
-        Ok(())
-    }
-
     pub fn new() -> Self {
-        Self {
+        let mut vm = Self {
             frames: [CallFrame::default(); FRAMES_MAX],
             frame_count: 0,
             stack: [Value::Nil; STACK_MAX],
             sp: 0,
             objects: HashSet::new(),
             globals: HashMap::new(),
-        }
+        };
+
+        vm.define_native("clock", 0, Value::clock);
+        vm
+    }
+
+    fn define_native(&mut self, name: &str, arity: usize, function: fn(Option<&[Value]>) -> Value) {
+        let n = ObjString::new(String::from(name));
+        let f = ObjNative::new(arity, function);
+        let name = Box::into_raw(Box::new(n)).cast();
+        let native = Box::into_raw(Box::new(f)).cast();
+        self.objects.insert(name);
+        self.objects.insert(native);
+        let name = NonNull::new(name).unwrap();
+        let native = NonNull::new(native).unwrap();
+        self.globals.insert(Value::Obj(name), Value::Obj(native));
     }
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
@@ -240,15 +229,59 @@ impl Vm {
         Ok(())
     }
 
+    pub fn call(&mut self, function: NonNull<ObjFunction>, arg_count: u8) -> Result<()> {
+        unsafe {
+            if (*function.as_ptr()).arity != arg_count {
+                return Err(anyhow!(
+                    "Expected {} arguments, but found {}.",
+                    (*function.as_ptr()).arity,
+                    arg_count
+                ));
+            }
+
+            if self.frame_count == FRAMES_MAX {
+                // TODO: print stack trace
+                return Err(anyhow!("Stack overflow."));
+            }
+
+            let frame = CallFrame {
+                function: function.as_ptr() as *const ObjFunction,
+                ip: (*function.as_ptr()).chunk.code().as_ptr(),
+                starting_slot: (self.sp - arg_count as usize).saturating_sub(1),
+            };
+
+            self.frames[self.frame_count] = frame;
+            self.frame_count += 1;
+        }
+        Ok(())
+    }
+
     fn call_value(&mut self, value: Value, arg_count: u8) -> Result<()> {
         match value {
             Value::Obj(o) => unsafe {
                 match o.as_ref().kind {
                     ObjType::Function => return self.call(o.cast(), arg_count),
+                    ObjType::Native => {
+                        let native = o.cast::<ObjNative>().as_ref();
+                        let arity = native.arity();
+                        if arity != arg_count as usize {
+                            return Err(anyhow!(
+                                "expected {arity} arguments, but found {arg_count}."
+                            ));
+                        }
+                        let args = match arity {
+                            0 => None,
+                            _ => Some(&self.stack[self.sp - arity..self.sp]),
+                        };
+                        let result = native.function()(args);
+                        self.sp -= arg_count as usize + 1;
+                        self.push(result);
+                        return Ok(());
+                    }
                     _ => {}
                 }
             },
-            _ => {},
+            _ => {}
         }
         Err(anyhow!("can only call functions and classes."))
     }
@@ -292,10 +325,9 @@ impl Vm {
 
             macro_rules! read_i16 {
                 () => {{
-                    frame.ip = frame.ip.add(2);
-                    let hi = *frame.ip.offset(-2);
-                    let lo = *frame.ip.offset(-1);
-                    u16::from_be_bytes([hi, lo])
+                    let hi = read_byte!();
+                    let lo = read_byte!();
+                    u16::from_le_bytes([lo, hi])
                 }};
             }
 
@@ -369,8 +401,9 @@ impl Vm {
                     }
                     OpCode::Jump => frame.ip = frame.ip.add(read_i16!() as usize),
                     OpCode::JumpIfFalse => {
+                        let jump = read_i16!() as usize;
                         if !self.peek(0).is_truthy() {
-                            frame.ip = frame.ip.add(read_i16!() as usize);
+                            frame.ip = frame.ip.add(jump);
                         }
                     }
                     OpCode::Loop => frame.ip = frame.ip.sub(read_i16!() as usize),
@@ -379,7 +412,7 @@ impl Vm {
                         self.frames[self.frame_count - 1] = frame;
                         self.call_value(self.peek(arg_count as usize), arg_count)?;
                         frame = self.frames[self.frame_count - 1];
-                    },
+                    }
                     OpCode::Return => {
                         let result = self.pop();
                         self.frame_count -= 1;
@@ -390,7 +423,7 @@ impl Vm {
                         self.sp = frame.starting_slot;
                         self.push(result);
                         frame = self.frames[self.frame_count - 1];
-                    },
+                    }
                 }
             }
             Ok(())
@@ -408,11 +441,10 @@ mod tests {
     #[test]
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
-        let source = r#"fun hello() {
-            print 5;
-        }
-        
-        print hello;"#;
+        let source = r#"
+        for (var i = 0; i < 5; i = i + 1) {
+            print clock();
+        }"#;
         vm.interpret(source)?;
         vm.free_objects();
         Ok(())

@@ -141,5 +141,26 @@ impl ObjFunction {
 pub struct ObjNative {
     obj: Obj,
     arity: usize,
-    function: fn([Value]) -> Value,
+    function: fn(Option<&[Value]>) -> Value,
+}
+
+impl ObjNative {
+    pub fn new(arity: usize, function: fn(Option<&[Value]>) -> Value) -> Self {
+        Self {
+            obj: Obj {
+                kind: ObjType::Native,
+                next: None,
+            },
+            arity,
+            function,
+        }
+    }
+
+    pub fn function(&self) -> fn(Option<&[Value]>) -> Value {
+        self.function
+    }
+
+    pub fn arity(&self) -> usize {
+        self.arity
+    }
 }
