@@ -130,7 +130,7 @@ impl Vm {
         let mut function = compile(source)?;
         self.push(Value::Obj(function.cast()));
         self.call(function, 0)?;
-        self.run(true)?;
+        self.run(false)?;
         // Might need to generalize this when it comes time to implement GC
         unsafe {
             let function = function.as_ptr();
@@ -332,14 +332,14 @@ impl Vm {
             }
 
             loop {
+                let chunk = &(*frame.function).chunk;
+                let code = chunk.code();
+                let offset = frame.ip.offset_from(code.as_ptr()) as usize;
+                if offset >= code.len() {
+                    break;
+                }
+                
                 if debug_trace {
-                    let chunk = &(*frame.function).chunk;
-                    let code = chunk.code();
-                    let offset = frame.ip.offset_from(code.as_ptr()) as usize;
-                    if offset >= code.len() {
-                        break;
-                    }
-
                     disassemble_instruction(chunk, offset);
                 }
 
