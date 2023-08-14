@@ -344,7 +344,10 @@ impl Vm {
                 }
 
                 match frame.op_from_byte()? {
-                    OpCode::Constant => self.push(read_constant!()),
+                    OpCode::Constant => {
+                        let constant = read_constant!();
+                        self.push(constant);
+                    }
                     OpCode::Nil => self.push(Value::Nil),
                     OpCode::True => self.push(Value::Bool(true)),
                     OpCode::False => self.push(Value::Bool(false)),
@@ -399,14 +402,20 @@ impl Vm {
                     OpCode::Print => {
                         println!("{}", self.pop());
                     }
-                    OpCode::Jump => frame.ip = frame.ip.add(read_i16!() as usize),
+                    OpCode::Jump => {
+                        let jump = read_i16!() as usize;
+                        frame.ip = frame.ip.add(jump)
+                    }
                     OpCode::JumpIfFalse => {
                         let jump = read_i16!() as usize;
                         if !self.peek(0).is_truthy() {
                             frame.ip = frame.ip.add(jump);
                         }
                     }
-                    OpCode::Loop => frame.ip = frame.ip.sub(read_i16!() as usize),
+                    OpCode::Loop => {
+                        let jump = read_i16!() as usize;
+                        frame.ip = frame.ip.sub(jump)
+                    }
                     OpCode::Call => {
                         let arg_count = read_byte!();
                         self.frames[self.frame_count - 1] = frame;
@@ -443,7 +452,7 @@ mod tests {
         let mut vm = Vm::new();
         let source = r#"
         for (var i = 0; i < 5; i = i + 1) {
-            print clock();
+            print i;
         }"#;
         vm.interpret(source)?;
         vm.free_objects();
