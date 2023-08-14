@@ -12,6 +12,7 @@ pub trait IsObj {
 pub enum ObjType {
     String,
     Function,
+    Native,
 }
 
 #[repr(C)]
@@ -104,12 +105,15 @@ pub struct ObjFunction {
     pub obj: Obj,
     pub arity: u8,
     pub chunk: Chunk,
-    pub name: Value,
+    pub name: Option<String>,
 }
 
 impl std::fmt::Display for ObjFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<fn {}>", self.name)
+        match &self.name {
+            Some(name) => write!(f, "<fn {}>", name),
+            None => write!(f, "<fn>"),
+        }
     }
 }
 
@@ -128,7 +132,14 @@ impl ObjFunction {
             },
             arity: 0,
             chunk: Chunk::new(),
-            name: Value::Nil,
+            name: None,
         }
     }
+}
+
+#[repr(C)]
+pub struct ObjNative {
+    obj: Obj,
+    arity: usize,
+    function: fn([Value]) -> Value,
 }

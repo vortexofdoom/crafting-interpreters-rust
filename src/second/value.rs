@@ -1,4 +1,4 @@
-use std::{hash::Hash, ops::Deref, ptr::NonNull};
+use std::{hash::Hash, ops::Deref, ptr::NonNull, time::{SystemTime, UNIX_EPOCH}};
 
 use anyhow::{anyhow, Result};
 
@@ -45,6 +45,10 @@ impl Value {
             .expect("just created a string")
             .cast();
         Self::Obj(ptr)
+    }
+
+    pub fn clock(args: &[Self]) -> Self {
+        Self::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0)
     }
 }
 
@@ -155,7 +159,10 @@ impl std::cmp::PartialEq for Value {
                         ObjType::String => {
                             l.cast::<ObjString>().as_ref() == r.cast::<ObjString>().as_ref()
                         }
-                        ObjType::Function => todo!(),
+                        ObjType::Function => {
+                            l.cast::<ObjFunction>().as_ref() == r.cast::<ObjFunction>().as_ref()
+                        },
+                        ObjType::Native => todo!(),
                     }
             },
             (Self::Nil, Self::Nil) => true,

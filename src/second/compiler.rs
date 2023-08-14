@@ -1,4 +1,4 @@
-use std::{iter::Peekable, ops::Index};
+use std::{iter::Peekable, ops::Index, ptr::NonNull};
 
 use anyhow::{anyhow, Result};
 use enum_map::{Enum, EnumMap};
@@ -6,7 +6,7 @@ use enum_map::{Enum, EnumMap};
 use super::{
     chunk::{Chunk, OpCode},
     object::{FunctionType, ObjFunction},
-    scanner::{scan, Parsed, Token, TokenType},
+    scanner::{scan, Parsed, Token, TokenType::{self, *}},
     value::Value,
     InterpretError,
 };
@@ -55,7 +55,7 @@ struct ParseRule<'a, T: Iterator<Item = Parsed<Token<'a>>>>(
 
 #[rustfmt::skip]
 impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
-    const LEFT_PAREN: Self      = Self(Some(Parser::grouping),  None,                   Precedence::None);
+    const LEFT_PAREN: Self      = Self(Some(Parser::grouping),  Some(Parser::call),     Precedence::Call);
     const RIGHT_PAREN: Self     = Self(None,                    None,                   Precedence::None);
     const LEFT_BRACE: Self      = Self(None,                    None,                   Precedence::None);
     const RIGHT_BRACE: Self     = Self(None,                    None,                   Precedence::None);
@@ -69,7 +69,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const BANG: Self            = Self(Some(Parser::unary),     None,                   Precedence::None);
     const BANG_EQUAL: Self      = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
     const EQUAL: Self           = Self(None,                    None,                   Precedence::None);
-    const EQUAL_EQUAL: Self     = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
+    const EQUAL_EQUAL: Self     = Self(None,                    Some(Parser::binary),   Precedence::Equality);
     const GREATER: Self         = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
     const GREATER_EQUAL: Self   = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
     const LESS: Self            = Self(None,                    Some(Parser::binary),   Precedence::Comparison);
@@ -178,11 +178,11 @@ impl Default for Local<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Compiler<'a> {
-    function: &'a mut ObjFunction,
+    function: NonNull<ObjFunction>,
     fun_type: FunctionType,
-    enclosing: Option<&'a mut Self>,
+    enclosing: Option<NonNull<Self>>,
     locals: [Local<'a>; 256],
     local_count: usize,
     scope_depth: usize,
@@ -191,62 +191,90 @@ struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     const MAX_LOCALS: usize = 256;
 
-    fn new(function: &'a mut ObjFunction) -> Self {
-        Self {
-            function,
+    fn new() -> Self {
+        let mut compiler = Self {
+            function: NonNull::new(Box::into_raw(Box::new(ObjFunction::new()))).unwrap(),
             fun_type: FunctionType::Script,
             enclosing: None,
             locals: [Local::default(); 256],
-            local_count: 0,
+            local_count: 1,
             scope_depth: 0,
-        }
+        };
+
+        compiler.locals[0] = Local {
+            name: "",
+            depth: 0,
+        };
+
+        compiler
     }
 
     fn new_enclosed(
-        enclosing: &'a mut Self,
-        function: &'a mut ObjFunction,
+        enclosing: NonNull<Self>,
         fun_type: FunctionType,
     ) -> Self {
-        Self {
-            function,
+        let mut compiler = Self {
+            function: NonNull::new(Box::into_raw(Box::new(ObjFunction::new()))).unwrap(),
             fun_type,
             enclosing: Some(enclosing),
             locals: [Local::default(); 256],
-            local_count: 0,
+            local_count: 1,
             scope_depth: 0,
+        };
+
+        compiler.locals[0] = Local {
+            name: "",
+            depth: 0,
+        };
+
+        compiler
+    }
+
+    fn function(&mut self) -> &mut ObjFunction {
+        unsafe {
+            self.function.as_mut()
         }
     }
 }
 
 struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
     prev: Option<(usize, Token<'a>)>,
-    current_compiler: Option<&'a mut Compiler<'a>>,
+    current_compiler: NonNull<Compiler<'a>>,
     tokens: Peekable<T>,
 }
 
 // Can probably do everything with peek() instead of keeping the previous token, but we'll find out
 impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     #[inline]
+    fn scope_depth(&self) -> usize {
+        unsafe {
+            self.current_compiler.as_ref().scope_depth
+        }
+    }
+    
+    #[inline]
     fn begin_scope(&mut self) {
-        if let Some(ref mut c) = self.current_compiler {
-            c.scope_depth += 1;
+        unsafe {
+            self.current_compiler.as_mut().scope_depth += 1;
         }
     }
 
     #[inline]
     fn end_scope(&mut self) -> Result<()> {
-        let mut compiler = self.current_compiler.as_mut().unwrap();
-        compiler.scope_depth -= 1;
-
-        while compiler.local_count > 0
-            && compiler.locals[compiler.local_count - 1].depth > compiler.scope_depth as isize
-        {
-            self.emit_byte(OpCode::Pop);
-            // reborrowing to make the borrow checker happy
-            compiler = self.current_compiler.as_mut().unwrap();
-            compiler.local_count -= 1;
+        unsafe {
+            let mut compiler = self.current_compiler.as_ptr();
+            
+            (*compiler).scope_depth -= 1;
+            
+            while (*compiler).local_count > 0
+            && (*compiler).locals[(*compiler).local_count - 1].depth > (*compiler).scope_depth as isize
+            {
+                self.emit_byte(OpCode::Pop);
+                // reborrowing to make the borrow checker happy
+                (*compiler).local_count.saturating_sub(1);
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     fn block(&mut self) -> Result<()> {
@@ -271,9 +299,11 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             Ok(false)
         }
     }
-
+    #[inline]
     fn chunk(&mut self) -> &mut Chunk {
-        &mut self.current_compiler.as_mut().unwrap().function.chunk
+        unsafe {
+            &mut self.current_compiler.as_mut().function().chunk
+        }
     }
 
     fn current(&mut self) -> Option<Result<(usize, Token)>> {
@@ -333,63 +363,114 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn declaration(&mut self) -> Result<()> {
-        if self.match_token(TokenType::Var)? {
+        if self.match_token(Fun)? {
+            self.fun_dec()
+        } else if self.match_token(Var)? {
             self.var_dec()
         } else {
             self.statement()
         }
     }
 
+    fn emit_return(&mut self) {
+        self.emit_byte(OpCode::Nil);
+        self.emit_byte(OpCode::Return);
+    }
+
+    fn fun_dec(&mut self) -> Result<()> {
+        let (global, line) = self.parse_variable()?;
+        let mut compiler = unsafe { self.current_compiler.as_mut() };
+        if compiler.scope_depth != 0 {
+            compiler.locals[compiler.local_count - 1].depth = compiler.scope_depth as isize;
+        }
+        self.function(FunctionType::Function)?;
+        self.define_variable(global)?;
+        Ok(())
+    }
+
+    fn init_compiler(&mut self, fun_type: FunctionType) -> Result<()> {
+        Ok(())
+    }
+
+    fn end_compiler(&mut self) -> Result<NonNull<ObjFunction>> {
+        self.emit_return();
+        unsafe {
+        let function = self.current_compiler.as_ref().function;
+            self.current_compiler = self.current_compiler.as_ref().enclosing.unwrap();
+            Ok(function)
+        }
+    }
+
+    fn function(&mut self, fun_type: FunctionType) -> Result<()> {
+        let enclosing = self.current_compiler;
+        let mut compiler = Compiler::new_enclosed(enclosing, fun_type);
+        let Some((_, Token::Identifier(name))) = self.prev else { unreachable!() };
+        compiler.function().name = Some(std::string::String::from(name));
+        self.current_compiler = NonNull::new(&mut compiler as *mut Compiler).unwrap();
+        self.begin_scope();
+        self.consume_token(LeftParen)?;
+        self.consume_token(RightParen)?;
+        self.consume_token(LeftBrace)?;
+        self.block()?;
+        self.emit_return();
+
+        let function = self.end_compiler()?;
+        let constant = self.chunk().add_constant(Value::Obj(function.cast()));
+        self.emit_byte(OpCode::Constant);
+        self.emit_byte(constant);
+        Ok(())
+    }
+
     fn var_dec(&mut self) -> Result<()> {
         let (global, line) = self.parse_variable()?;
-        if self.match_token(TokenType::Equal)? {
+        if self.match_token(Equal)? {
             self.expression()?;
         } else {
             self.chunk().write(OpCode::Nil, line);
         }
-        self.consume_token(TokenType::Semicolon)?;
+        self.consume_token(Semicolon)?;
 
         // Define variable
-        if self
-            .current_compiler
-            .as_ref()
-            .is_some_and(|c| c.scope_depth > 0)
-        {
-            return Ok(());
-        }
-        self.chunk().write(OpCode::DefineGlobal, line);
-        self.chunk().write(global, line);
-        Ok(())
+        self.define_variable(global)
     }
 
     fn parse_variable(&mut self) -> Result<(u8, usize)> {
-        self.consume_token(TokenType::Identifier)?;
+        self.consume_token(Identifier)?;
         // this is infalliable since if it wasn't an identifier we'd return with an error after the previous line
         let Some((l, Token::Identifier(s))) = self.prev else {
             unreachable!()
         };
 
         self.declare_variable()?;
+        let string = s.to_string();
 
         Ok((
-            self.chunk().add_constant(Value::new_string(s.to_string())),
+            self.chunk().add_constant(Value::new_string(string)),
             l,
         ))
     }
 
+    fn mark_initialized(&mut self) -> Result<()> {
+        let depth = self.scope_depth();
+        if depth != 0 {
+            unsafe {
+                let compiler = self.current_compiler.as_mut();
+                compiler.locals[compiler.local_count - 1].depth = compiler.scope_depth as isize;
+            }
+        }
+        Ok(())
+    }
+
     fn declare_variable(&mut self) -> Result<()> {
-        if self
-            .current_compiler
-            .as_ref()
-            .is_some_and(|c| c.scope_depth == 0)
-        {
+        if self.scope_depth() == 0 {
             return Ok(());
         }
 
         match self.prev {
             Some((_, Token::Identifier(name))) => {
-                let compiler = self.current_compiler.as_ref().unwrap();
+                let compiler = unsafe { self.current_compiler.as_mut() };
                 for i in (0..compiler.local_count).rev() {
+                    println!("{}", compiler.local_count);
                     let local = compiler.locals[i];
                     if local.depth != -1 && local.depth < compiler.scope_depth as isize {
                         break;
@@ -405,27 +486,38 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
     }
 
+    fn define_variable(&mut self, global: u8) -> Result<()> {
+        if self.scope_depth() > 0 {
+            self.mark_initialized()
+        } else {
+            self.emit_byte(OpCode::DefineGlobal);
+            self.emit_byte(global);
+            Ok(())
+        }
+    }
+
     fn add_local(&mut self, name: &'a str) -> Result<()> {
-        let mut compiler = self.current_compiler.as_mut().unwrap();
+        let mut compiler = unsafe { self.current_compiler.as_mut() };
         if compiler.local_count == Compiler::MAX_LOCALS {
             return Err(anyhow!("Too many local variables"));
         }
-        compiler.locals[compiler.local_count] = Local {
-            name,
-            depth: compiler.scope_depth as isize,
-        };
+        compiler.locals[compiler.local_count] = Local { name, depth: -1 };
         compiler.local_count += 1;
         Ok(())
     }
 
-    fn resolve_local(&mut self, name: &str) -> Option<u8> {
-        let compiler = self.current_compiler.as_ref().unwrap();
+    fn resolve_local(&mut self, name: &str) -> Result<Option<u8>> {
+        let compiler = unsafe { self.current_compiler.as_ref() };
         for i in (0..compiler.local_count).rev() {
+            let local = compiler.locals[i];
+            if local.depth == -1 {
+                return Err(anyhow!("Can't read local variable in its own initializer."));
+            }
             if compiler.locals[i].name == name {
-                return Some(i as u8);
+                return Ok(Some(i as u8));
             }
         }
-        None
+        Ok(None)
     }
 
     fn variable(&mut self, can_assign: bool) -> Result<()> {
@@ -433,7 +525,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             unreachable!()
         };
 
-        let (arg, get_op, set_op) = if let Some(i) = self.resolve_local(name) {
+        let (arg, get_op, set_op) = if let Some(i) = self.resolve_local(name)? {
             (i, OpCode::GetLocal, OpCode::SetLocal)
         } else {
             (
@@ -444,7 +536,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             )
         };
 
-        if can_assign && self.match_token(TokenType::Equal)? {
+        if can_assign && self.match_token(Equal)? {
             self.expression()?;
             self.chunk().write(set_op, l);
         } else {
@@ -536,7 +628,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.end_scope();
             }
             Token::Class => todo!(),
-            Token::Fun => todo!(),
             Token::For => {
                 self.begin_scope();
                 self.advance()?;
@@ -608,7 +699,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.consume_token(TokenType::Semicolon)?;
                 self.chunk().write(OpCode::Print, line);
             }
-            Token::Return => todo!(),
+            Token::Return => {
+                self.advance()?;
+                if self.match_token(Semicolon)? {
+                    self.emit_return();
+                } else {
+                    self.expression()?;
+                    self.consume_token(Semicolon)?;
+                    self.emit_byte(OpCode::Return);
+                }
+            },
             Token::While => {
                 self.advance()?;
                 let loop_start = self.chunk().code().len();
@@ -647,6 +747,27 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn expression(&mut self) -> Result<()> {
         self.parse_precedence(Precedence::Assignment)
+    }
+
+    fn call(&mut self, _can_assign: bool) -> Result<()> {
+        let arg_count = self.argument_list()?;
+        self.emit_byte(OpCode::Call);
+        self.emit_byte(arg_count);
+        Ok(())
+    }
+
+    fn argument_list(&mut self) -> Result<u8> {
+        let mut arg_count = 0;
+        while !self.match_token(RightParen)? {
+            self.expression()?;
+            arg_count += 1;
+            if arg_count == 255 {
+                return Err(anyhow!("can't have more than 255 arguments"));
+            }
+            self.match_token(Comma)?;
+        }
+
+        Ok(arg_count)
     }
 
     fn unary(&mut self, can_assign: bool) -> Result<()> {
@@ -744,10 +865,15 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 }
 
-fn parse<'a>(source: &'a str, compiler: &'a mut Compiler<'a>) {
+pub fn compile(source: &str) -> Result<NonNull<ObjFunction>> {
+    // for token in scan(source) {
+    //     println!("Token: {token}");
+    // }
+    let mut compiler = Compiler::new();
+
     let mut parser = Parser {
         prev: None,
-        current_compiler: Some(compiler),
+        current_compiler: NonNull::new(&mut compiler as *mut Compiler).unwrap(),
         tokens: scan(source),
     };
 
@@ -757,16 +883,8 @@ fn parse<'a>(source: &'a str, compiler: &'a mut Compiler<'a>) {
             println!("{e}");
         }
     }
-}
 
-pub fn compile(source: &str) -> Result<ObjFunction> {
-    // for token in scan(source) {
-    //     println!("Token: {token}");
-    // }
-    let mut function = ObjFunction::new();
-    let mut compiler = Compiler::new(&mut function);
+    parser.emit_return();
 
-    parse(source, &mut compiler);
-
-    return Ok(function);
+    return Ok(compiler.function);
 }

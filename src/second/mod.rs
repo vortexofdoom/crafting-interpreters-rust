@@ -20,7 +20,7 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    object::{Obj, ObjFunction, ObjString, ObjType},
+    object::{Obj, ObjFunction, ObjString, ObjType, ObjNative},
     value::Value,
 };
 
@@ -29,9 +29,15 @@ const FRAMES_MAX: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 struct CallFrame {
-    function: NonNull<ObjFunction>,
+    function: *const ObjFunction,
     ip: *const u8,
     starting_slot: usize,
+}
+
+impl Default for CallFrame {
+    fn default() -> Self {
+        Self { function: std::ptr::null(), ip: std::ptr::null(), starting_slot: Default::default() }
+    }
 }
 
 impl CallFrame {
@@ -48,7 +54,7 @@ impl CallFrame {
     fn read_constant(&mut self) -> Value {
         unsafe {
             let i = self.read_byte() as usize;
-            (*self.function.as_ptr()).chunk.constants()[i]
+            (*self.function).chunk.constants()[i]
         }
     }
 
@@ -75,7 +81,7 @@ impl std::fmt::Display for InterpretError {
 
 pub struct Vm {
     //chunk: Option<Chunk>,
-    frames: [MaybeUninit<CallFrame>; FRAMES_MAX],
+    frames: [CallFrame; FRAMES_MAX],
     frame_count: usize,
     stack: [Value; STACK_MAX],
     sp: usize,
@@ -91,30 +97,38 @@ pub struct Vm {
 
 impl Vm {
     pub fn init(&mut self) {
-        //self.chunk = None;
         self.stack.fill(Value::Nil);
-        self.sp = 0;
+        self.sp = 1;
         self.free_objects();
         self.globals.clear();
-        //self.ip = 0;
     }
 
-    pub fn new_frame(&mut self, function: NonNull<ObjFunction>) {
+    pub fn call(&mut self, function: NonNull<ObjFunction>, arg_count: u8) -> Result<()> {
         unsafe {
+            if (*function.as_ptr()).arity != arg_count {
+                return Err(anyhow!("Expected {} arguments, but found {}.", (*function.as_ptr()).arity, arg_count));
+            }
+
+            if self.frame_count == FRAMES_MAX {
+                // TODO: print stack trace
+                return Err(anyhow!("Stack overflow."));
+            }
+
             let frame = CallFrame {
-                function,
+                function: function.as_ptr() as *const ObjFunction,
                 ip: (*function.as_ptr()).chunk.code().as_ptr(),
-                starting_slot: self.sp,
+                starting_slot: (self.sp - arg_count as usize).saturating_sub(1),
             };
 
-            self.frames[self.frame_count] = MaybeUninit::new(frame);
+            self.frames[self.frame_count] = frame;
             self.frame_count += 1;
         }
+        Ok(())
     }
 
     pub fn new() -> Self {
         Self {
-            frames: [MaybeUninit::uninit(); FRAMES_MAX],
+            frames: [CallFrame::default(); FRAMES_MAX],
             frame_count: 0,
             stack: [Value::Nil; STACK_MAX],
             sp: 0,
@@ -125,9 +139,19 @@ impl Vm {
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
         let mut function = compile(source)?;
-        let ip = function.chunk.code().as_ptr();
-        self.new_frame(NonNull::new(&mut function as *mut ObjFunction).unwrap());
-        self.run(true)
+        self.push(Value::Obj(function.cast()));
+        self.call(function, 0)?;
+        self.run(true)?;
+        // Might need to generalize this when it comes time to implement GC
+        unsafe {
+            let function = function.as_ptr();
+            for constant in (*function).chunk.constants().iter() {
+                if let Value::Obj(o) = constant {
+                    self.objects.insert(o.as_ptr());
+                }
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -165,6 +189,7 @@ impl Vm {
                 match (*(*obj)).kind {
                     ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
                     ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
+                    ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
                 };
             }
         }
@@ -173,8 +198,9 @@ impl Vm {
 
     unsafe fn free_object(&mut self, obj: *mut Obj) {
         match (*obj).kind {
-            ObjType::String => Box::from_raw(obj.cast::<ObjString>()),
-            ObjType::Function => todo!(),
+            ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
+            ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
+            ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
         };
         self.objects.remove(&obj);
     }
@@ -214,9 +240,22 @@ impl Vm {
         Ok(())
     }
 
+    fn call_value(&mut self, value: Value, arg_count: u8) -> Result<()> {
+        match value {
+            Value::Obj(o) => unsafe {
+                match o.as_ref().kind {
+                    ObjType::Function => return self.call(o.cast(), arg_count),
+                    _ => {}
+                }
+            },
+            _ => {},
+        }
+        Err(anyhow!("can only call functions and classes."))
+    }
+
     pub fn run(&mut self, debug_trace: bool) -> Result<()> {
         unsafe {
-            let mut frame = self.frames[self.frame_count - 1].assume_init();
+            let mut frame = self.frames[self.frame_count - 1];
 
             macro_rules! read_byte {
                 () => {
@@ -231,7 +270,7 @@ impl Vm {
             macro_rules! read_constant {
                 () => {{
                     let i = read_byte!() as usize;
-                    (*frame.function.as_ptr()).chunk.constants()[i]
+                    (*frame.function).chunk.constants()[i]
                 }};
             }
 
@@ -262,7 +301,7 @@ impl Vm {
 
             loop {
                 if debug_trace {
-                    let chunk = &(*frame.function.as_ptr()).chunk;
+                    let chunk = &(*frame.function).chunk;
                     let code = chunk.code();
                     let offset = frame.ip.offset_from(code.as_ptr()) as usize;
                     if offset >= code.len() {
@@ -284,8 +323,6 @@ impl Vm {
                     }
                     OpCode::GetGlobal => {
                         let name = read_constant!();
-                        println!("{:?}", self.globals);
-                        //println!("{name:?}");
                         if let Some(value) = self.globals.get(&name) {
                             self.push(*value);
                         } else {
@@ -296,7 +333,6 @@ impl Vm {
                         let name = read_constant!();
                         let value = self.peek(0);
                         self.globals.insert(name, value);
-                        println!("{:?}", self.globals);
                         self.pop();
                     }
                     OpCode::SetLocal => {
@@ -338,7 +374,23 @@ impl Vm {
                         }
                     }
                     OpCode::Loop => frame.ip = frame.ip.sub(read_i16!() as usize),
-                    OpCode::Return => break,
+                    OpCode::Call => {
+                        let arg_count = read_byte!();
+                        self.frames[self.frame_count - 1] = frame;
+                        self.call_value(self.peek(arg_count as usize), arg_count)?;
+                        frame = self.frames[self.frame_count - 1];
+                    },
+                    OpCode::Return => {
+                        let result = self.pop();
+                        self.frame_count -= 1;
+                        if self.frame_count == 0 {
+                            self.pop();
+                            break;
+                        }
+                        self.sp = frame.starting_slot;
+                        self.push(result);
+                        frame = self.frames[self.frame_count - 1];
+                    },
                 }
             }
             Ok(())
@@ -356,7 +408,11 @@ mod tests {
     #[test]
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
-        let source = "5 >= 6\n\"hello\"\n\"hi I'm dkflajf\"\n\"more strings here\"";
+        let source = r#"fun hello() {
+            print 5;
+        }
+        
+        print hello;"#;
         vm.interpret(source)?;
         vm.free_objects();
         Ok(())
