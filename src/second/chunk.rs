@@ -15,6 +15,8 @@ pub enum OpCode {
     DefineGlobal,
     SetLocal,
     SetGlobal,
+    GetUpvalue,
+    SetUpvalue,
     Equal,
     Greater,
     GreaterEqual,
@@ -31,6 +33,8 @@ pub enum OpCode {
     JumpIfFalse,
     Loop,
     Call,
+    Closure,
+    CloseUpvalue,
     Return,
 }
 

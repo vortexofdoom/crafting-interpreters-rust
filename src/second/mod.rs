@@ -6,6 +6,7 @@ pub mod scanner;
 pub mod value;
 
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Write},
@@ -20,7 +21,7 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
-    object::{Obj, ObjFunction, ObjNative, ObjString, ObjType},
+    object::{Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
     value::Value,
 };
 
@@ -29,7 +30,7 @@ const FRAMES_MAX: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 struct CallFrame {
-    function: *const ObjFunction,
+    closure: *const ObjClosure,
     ip: *const u8,
     starting_slot: usize,
 }
@@ -37,7 +38,7 @@ struct CallFrame {
 impl Default for CallFrame {
     fn default() -> Self {
         Self {
-            function: std::ptr::null(),
+            closure: std::ptr::null(),
             ip: std::ptr::null(),
             starting_slot: Default::default(),
         }
@@ -58,7 +59,7 @@ impl CallFrame {
     fn read_constant(&mut self) -> Value {
         unsafe {
             let i = self.read_byte() as usize;
-            (*self.function).chunk.constants()[i]
+            (*self.closure).function().chunk.constants()[i]
         }
     }
 
@@ -87,7 +88,7 @@ pub struct Vm {
     //chunk: Option<Chunk>,
     frames: [CallFrame; FRAMES_MAX],
     frame_count: usize,
-    stack: [Value; STACK_MAX],
+    stack: [Cell<Value>; STACK_MAX],
     sp: usize,
     //sp: usize,
     //ip: usize,
@@ -100,11 +101,12 @@ pub struct Vm {
 }
 
 impl Vm {
+    const DEFAULT_VAL: Cell<Value> = Cell::new(Value::Nil);
     pub fn new() -> Self {
         let mut vm = Self {
             frames: [CallFrame::default(); FRAMES_MAX],
             frame_count: 0,
-            stack: [Value::Nil; STACK_MAX],
+            stack: [Self::DEFAULT_VAL; STACK_MAX],
             sp: 0,
             objects: HashSet::new(),
             globals: HashMap::new(),
@@ -114,7 +116,12 @@ impl Vm {
         vm
     }
 
-    fn define_native(&mut self, name: &str, arity: usize, function: fn(Option<&[Value]>) -> Value) {
+    fn define_native(
+        &mut self,
+        name: &str,
+        arity: usize,
+        function: fn(Option<&[Cell<Value>]>) -> Value,
+    ) {
         let n = ObjString::new(String::from(name));
         let f = ObjNative::new(arity, function);
         let name = Box::into_raw(Box::new(n)).cast();
@@ -127,14 +134,17 @@ impl Vm {
     }
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
-        let mut function = compile(source)?;
+        let function = compile(source)?;
         self.push(Value::Obj(function.cast()));
-        self.call(function, 0)?;
+        self.pop();
+        let mut closure = ObjClosure::new(function).into_ptr();
+        self.push(Value::Obj(closure.cast()));
+        self.call(closure, 0)?;
         self.run(false)?;
         // Might need to generalize this when it comes time to implement GC
         unsafe {
-            let function = function.as_ptr();
-            for constant in (*function).chunk.constants().iter() {
+            let function = (*closure.as_ptr()).function();
+            for constant in function.chunk.constants().iter() {
                 if let Value::Obj(o) = constant {
                     self.objects.insert(o.as_ptr());
                 }
@@ -147,10 +157,10 @@ impl Vm {
     fn push(&mut self, value: Value) {
         // SAFETY: the stack pointer is defined in terms of the stack, and we check bounds at compile time
         //println!("pushing {value}, sp: {}", self.sp);
-        self.stack[self.sp] = value;
+        self.stack[self.sp].set(value);
         self.sp += 1;
         // Every time we push a value, we add it to the linked list
-        if let Value::Obj(mut o) = value {
+        if let Value::Obj(o) = value {
             self.objects.insert(o.as_ptr());
             // unsafe {
             //     println!("push curr: {:?}, new: {:?}", self.objects, o);
@@ -164,12 +174,12 @@ impl Vm {
     fn pop(&mut self) -> Value {
         self.sp -= 1;
         //println!("popping {}, sp: {}", self.stack[self.sp], self.sp);
-        self.stack[self.sp]
+        self.stack[self.sp].get()
     }
 
     #[inline]
     fn peek(&self, dist: usize) -> Value {
-        self.stack[self.sp - 1 - dist]
+        self.stack[self.sp - 1 - dist].get()
     }
 
     pub fn free_objects(&mut self) {
@@ -179,6 +189,8 @@ impl Vm {
                     ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
                     ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
                     ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
+                    ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
+                    ObjType::Upvalue => drop(Box::from_raw(obj.cast::<ObjUpvalue>())),
                 };
             }
         }
@@ -190,13 +202,15 @@ impl Vm {
             ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
             ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
             ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
+            ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
+            ObjType::Upvalue => drop(Box::from_raw(obj.cast::<ObjUpvalue>())),
         };
         self.objects.remove(&obj);
     }
 
     #[inline]
     fn reset_stack(&mut self) {
-        self.stack.fill(Value::Nil);
+        self.stack.fill(Self::DEFAULT_VAL);
         self.sp = 0;
     }
 
@@ -229,12 +243,13 @@ impl Vm {
         Ok(())
     }
 
-    pub fn call(&mut self, function: NonNull<ObjFunction>, arg_count: u8) -> Result<()> {
+    pub fn call(&mut self, closure: NonNull<ObjClosure>, arg_count: u8) -> Result<()> {
         unsafe {
-            if (*function.as_ptr()).arity != arg_count {
+            let function = (*closure.as_ptr()).function.as_ptr();
+            if (*function).arity != arg_count {
                 return Err(anyhow!(
                     "Expected {} arguments, but found {}.",
-                    (*function.as_ptr()).arity,
+                    (*function).arity,
                     arg_count
                 ));
             }
@@ -245,8 +260,8 @@ impl Vm {
             }
 
             let frame = CallFrame {
-                function: function.as_ptr() as *const ObjFunction,
-                ip: (*function.as_ptr()).chunk.code().as_ptr(),
+                closure: closure.as_ptr() as *const ObjClosure,
+                ip: (*function).chunk.code().as_ptr(),
                 starting_slot: (self.sp - arg_count as usize).saturating_sub(1),
             };
 
@@ -260,7 +275,7 @@ impl Vm {
         match value {
             Value::Obj(o) => unsafe {
                 match o.as_ref().kind {
-                    ObjType::Function => return self.call(o.cast(), arg_count),
+                    ObjType::Closure => return self.call(o.cast(), arg_count),
                     ObjType::Native => {
                         let native = o.cast::<ObjNative>().as_ref();
                         let arity = native.arity();
@@ -303,7 +318,7 @@ impl Vm {
             macro_rules! read_constant {
                 () => {{
                     let i = read_byte!() as usize;
-                    (*frame.function).chunk.constants()[i]
+                    (*frame.closure).function().chunk.constants()[i]
                 }};
             }
 
@@ -332,13 +347,13 @@ impl Vm {
             }
 
             loop {
-                let chunk = &(*frame.function).chunk;
+                let chunk = &(*frame.closure).function().chunk;
                 let code = chunk.code();
                 let offset = frame.ip.offset_from(code.as_ptr()) as usize;
                 if offset >= code.len() {
                     break;
                 }
-                
+
                 if debug_trace {
                     disassemble_instruction(chunk, offset);
                 }
@@ -354,7 +369,7 @@ impl Vm {
                     OpCode::Pop => _ = self.pop(),
                     OpCode::GetLocal => {
                         let slot = frame.read_byte();
-                        self.push(self.stack[frame.starting_slot + slot as usize]);
+                        self.push(self.stack[frame.starting_slot + slot as usize].get());
                     }
                     OpCode::GetGlobal => {
                         let name = read_constant!();
@@ -372,7 +387,7 @@ impl Vm {
                     }
                     OpCode::SetLocal => {
                         let slot = read_byte!();
-                        self.stack[frame.starting_slot + slot as usize] = self.peek(0);
+                        self.stack[frame.starting_slot + slot as usize].set(self.peek(0));
                     }
                     OpCode::SetGlobal => {
                         let name = read_constant!();
@@ -381,6 +396,15 @@ impl Vm {
                             self.globals.remove(&name);
                             return Err(anyhow!(InterpretError::Runtime));
                         }
+                    }
+                    OpCode::GetUpvalue => {
+                        let slot = read_byte!() as usize;
+                        self.push((*(*(*frame.closure).upvalues[slot]).location).get());
+                    }
+                    OpCode::SetUpvalue => {
+                        let slot = read_byte!() as usize;
+                        let upvalue = (*frame.closure).upvalues[slot] as *mut ObjUpvalue;
+                        (*upvalue).set_value(self.peek(0));
                     }
                     OpCode::Equal => compare!(==),
                     OpCode::Greater => compare!(>),
@@ -422,6 +446,37 @@ impl Vm {
                         self.call_value(self.peek(arg_count as usize), arg_count)?;
                         frame = self.frames[self.frame_count - 1];
                     }
+                    OpCode::Closure => match read_constant!() {
+                        Value::Obj(o) => {
+                            let closure = ObjClosure::new(o.cast()).into_ptr();
+                            self.push(Value::Obj(closure.cast()));
+                            let upvalues = &mut (*closure.as_ptr()).upvalues;
+                            for i in 0..upvalues.len() {
+                                let is_local = read_byte!() == 1;
+                                let index = read_byte!() as usize;
+                                if is_local {
+                                    let upvalue =
+                                        ObjUpvalue::new(&self.stack[frame.starting_slot + index])
+                                            .into_ptr()
+                                            .as_ptr();
+                                    self.objects.insert(upvalue.cast());
+                                    upvalues[i] = upvalue as *const ObjUpvalue;
+                                } else {
+                                    upvalues[i] = (*frame.closure).upvalues[index];
+                                }
+                            }
+                            unsafe {
+                                let function = (*closure.as_ptr()).function();
+                                for constant in function.chunk.constants().iter() {
+                                    if let Value::Obj(o) = constant {
+                                        self.objects.insert(o.as_ptr());
+                                    }
+                                }
+                            }
+                        }
+                        _ => return Err(anyhow!(InterpretError::Runtime)),
+                    },
+                    OpCode::CloseUpvalue => {}
                     OpCode::Return => {
                         let result = self.pop();
                         self.frame_count -= 1;
@@ -451,9 +506,17 @@ mod tests {
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
         let source = r#"
-        for (var i = 0; i < 5; i = i + 1) {
-            print i;
-        }"#;
+        var x = 1;
+        
+        fun outer() {
+            var x = "outside";
+            fun inner() {
+                print x;
+            }
+            inner();
+        }
+        outer();
+        "#;
         vm.interpret(source)?;
         vm.free_objects();
         Ok(())

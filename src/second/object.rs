@@ -1,4 +1,4 @@
-use std::ptr::NonNull;
+use std::{cell::Cell, ptr::NonNull};
 
 use super::{chunk::Chunk, value::Value};
 
@@ -13,6 +13,8 @@ pub enum ObjType {
     String,
     Function,
     Native,
+    Closure,
+    Upvalue,
 }
 
 #[repr(C)]
@@ -23,6 +25,7 @@ pub struct Obj {
 }
 
 impl Obj {
+    #[inline]
     fn string() -> Self {
         Self {
             kind: ObjType::String,
@@ -30,6 +33,7 @@ impl Obj {
         }
     }
 
+    #[inline]
     fn function() -> Self {
         Self {
             kind: ObjType::Function,
@@ -37,6 +41,22 @@ impl Obj {
         }
     }
 
+    #[inline]
+    fn closure() -> Self {
+        Self {
+            kind: ObjType::Closure,
+            next: None,
+        }
+    }
+
+    fn upvalue() -> Self {
+        Self {
+            kind: ObjType::Upvalue,
+            next: None,
+        }
+    }
+
+    #[inline]
     pub fn set_next(&mut self, next: Option<NonNull<Self>>) {
         self.next = next;
     }
@@ -65,11 +85,17 @@ impl std::hash::Hash for ObjString {
 impl IsObj for ObjString {}
 
 impl ObjString {
+    #[inline]
     pub fn new(string: String) -> Self {
         Self {
             obj: Obj::string(),
             string,
         }
+    }
+
+    #[inline]
+    pub fn into_ptr(self) -> NonNull<Self> {
+        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 }
 
@@ -104,6 +130,7 @@ pub enum FunctionType {
 pub struct ObjFunction {
     pub obj: Obj,
     pub arity: u8,
+    pub upvalue_count: u8,
     pub chunk: Chunk,
     pub name: Option<String>,
 }
@@ -124,6 +151,7 @@ impl PartialEq for ObjFunction {
 }
 
 impl ObjFunction {
+    #[inline]
     pub fn new() -> Self {
         Self {
             obj: Obj {
@@ -131,9 +159,15 @@ impl ObjFunction {
                 next: None,
             },
             arity: 0,
+            upvalue_count: 0,
             chunk: Chunk::new(),
             name: None,
         }
+    }
+
+    #[inline]
+    pub fn into_ptr(self) -> NonNull<Self> {
+        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 }
 
@@ -141,11 +175,12 @@ impl ObjFunction {
 pub struct ObjNative {
     obj: Obj,
     arity: usize,
-    function: fn(Option<&[Value]>) -> Value,
+    function: fn(Option<&[Cell<Value>]>) -> Value,
 }
 
 impl ObjNative {
-    pub fn new(arity: usize, function: fn(Option<&[Value]>) -> Value) -> Self {
+    #[inline]
+    pub fn new(arity: usize, function: fn(Option<&[Cell<Value>]>) -> Value) -> Self {
         Self {
             obj: Obj {
                 kind: ObjType::Native,
@@ -156,11 +191,80 @@ impl ObjNative {
         }
     }
 
-    pub fn function(&self) -> fn(Option<&[Value]>) -> Value {
+    #[inline]
+    pub fn function(&self) -> fn(Option<&[Cell<Value>]>) -> Value {
         self.function
     }
 
+    #[inline]
     pub fn arity(&self) -> usize {
         self.arity
+    }
+
+    #[inline]
+    pub fn into_ptr(self) -> NonNull<Self> {
+        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
+    }
+}
+
+#[repr(C)]
+pub struct ObjClosure {
+    obj: Obj,
+    pub function: NonNull<ObjFunction>,
+    pub upvalues: Vec<*const ObjUpvalue>,
+}
+
+impl std::fmt::Display for ObjClosure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe { write!(f, "{}", self.function.as_ref()) }
+    }
+}
+
+impl ObjClosure {
+    #[inline]
+    pub fn new(function: NonNull<ObjFunction>) -> Self {
+        unsafe {
+            Self {
+                obj: Obj::closure(),
+                function,
+                upvalues: vec![std::ptr::null(); (*function.as_ptr()).upvalue_count as usize],
+            }
+        }
+    }
+
+    #[inline]
+    pub fn function(&self) -> &ObjFunction {
+        unsafe { self.function.as_ref() }
+    }
+
+    #[inline]
+    pub fn into_ptr(self) -> NonNull<Self> {
+        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
+    }
+}
+
+#[repr(C)]
+pub struct ObjUpvalue {
+    obj: Obj,
+    pub location: *const Cell<Value>,
+}
+
+impl ObjUpvalue {
+    pub fn new(value: &Cell<Value>) -> Self {
+        Self {
+            obj: Obj::upvalue(),
+            location: value as *const Cell<Value>,
+        }
+    }
+
+    pub fn set_value(&mut self, value: Value) {
+        unsafe {
+            (*self.location).set(value);
+        }
+    }
+
+    #[inline]
+    pub fn into_ptr(self) -> NonNull<Self> {
+        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 }

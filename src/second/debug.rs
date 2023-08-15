@@ -27,6 +27,16 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         | OpCode::SetGlobal => constant_inst(chunk, offset),
         OpCode::Jump | OpCode::JumpIfFalse => jump_inst(chunk, 1, offset),
         OpCode::Loop => jump_inst(chunk, -1, offset),
+        OpCode::Closure => {
+            let constant = chunk.code()[offset + 1];
+            println!(
+                "{:16?} {:4} -> {}",
+                OpCode::try_from(chunk.code()[offset]).unwrap(),
+                constant,
+                chunk.constants()[constant as usize],
+            );
+            offset + 2
+        }
         _ => simple_inst(chunk, offset),
     }
 }
@@ -56,4 +66,13 @@ pub fn constant_inst(chunk: &Chunk, offset: usize) -> usize {
 pub fn simple_inst(chunk: &Chunk, offset: usize) -> usize {
     println!("{:?}", OpCode::try_from(chunk.code()[offset]).unwrap());
     offset + 1
+}
+
+pub fn byte_inst(chunk: &Chunk, offset: usize) -> usize {
+    println!(
+        "{:16?} {:4}",
+        OpCode::try_from(chunk.code()[offset]).unwrap(),
+        chunk.code()[offset + 1],
+    );
+    offset + 2
 }

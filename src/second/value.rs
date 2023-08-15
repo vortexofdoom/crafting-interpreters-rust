@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     hash::Hash,
     ops::Deref,
     ptr::NonNull,
@@ -9,7 +10,7 @@ use anyhow::{anyhow, Result};
 
 use super::{
     chunk::Chunk,
-    object::{Obj, ObjFunction, ObjString, ObjType},
+    object::{Obj, ObjClosure, ObjFunction, ObjString, ObjType, ObjUpvalue},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -52,7 +53,7 @@ impl Value {
         Self::Obj(ptr)
     }
 
-    pub fn clock(args: Option<&[Self]>) -> Self {
+    pub fn clock(args: Option<&[Cell<Self>]>) -> Self {
         Self::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0)
     }
 }
@@ -69,6 +70,7 @@ impl std::fmt::Display for Value {
                     ObjType::String => write!(f, "{}", o.cast::<ObjString>().as_ref()),
                     ObjType::Function => write!(f, "{}", o.cast::<ObjFunction>().as_ref()),
                     ObjType::Native => write!(f, "<native fn>"),
+                    ObjType::Upvalue => write!(f, "upvalue"),
                     _ => unreachable!(),
                 }
             },
@@ -168,7 +170,9 @@ impl std::cmp::PartialEq for Value {
                         ObjType::Function => {
                             l.cast::<ObjFunction>().as_ref() == r.cast::<ObjFunction>().as_ref()
                         }
+                        ObjType::Closure => todo!(),
                         ObjType::Native => todo!(),
+                        ObjType::Upvalue => todo!(),
                     }
             },
             (Self::Nil, Self::Nil) => true,

@@ -75,7 +75,7 @@ pub enum TokenType {
     LessEqual,
     // Literals
     Identifier,
-    String,
+    Strng,
     Number,
     // Keywords
     And,
@@ -119,7 +119,7 @@ impl From<Token<'_>> for TokenType {
             Token::Less => Self::Less,
             Token::LessEqual => Self::LessEqual,
             Token::Identifier(_) => Self::Identifier,
-            Token::String(_) => Self::String,
+            Token::String(_) => Self::Strng,
             Token::Number(_) => Self::Number,
             Token::And => Self::And,
             Token::Class => Self::Class,
@@ -164,7 +164,7 @@ impl std::fmt::Display for TokenType {
             TokenType::Less => "<",
             TokenType::LessEqual => "<=",
             TokenType::Identifier => "identifier",
-            TokenType::String => "string",
+            TokenType::Strng => "string",
             TokenType::Number => "number",
             TokenType::And => "and",
             TokenType::Class => "class",
