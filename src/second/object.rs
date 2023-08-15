@@ -172,6 +172,7 @@ impl ObjFunction {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone)]
 pub struct ObjNative {
     obj: Obj,
     arity: usize,
@@ -208,10 +209,11 @@ impl ObjNative {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone)]
 pub struct ObjClosure {
     obj: Obj,
     pub function: NonNull<ObjFunction>,
-    pub upvalues: Vec<*const ObjUpvalue>,
+    pub upvalues: Vec<NonNull<ObjUpvalue>>,
 }
 
 impl std::fmt::Display for ObjClosure {
@@ -227,7 +229,7 @@ impl ObjClosure {
             Self {
                 obj: Obj::closure(),
                 function,
-                upvalues: vec![std::ptr::null(); (*function.as_ptr()).upvalue_count as usize],
+                upvalues: Vec::with_capacity((*function.as_ptr()).upvalue_count as usize),
             }
         }
     }
@@ -244,16 +246,21 @@ impl ObjClosure {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone)]
 pub struct ObjUpvalue {
     obj: Obj,
     pub location: *const Cell<Value>,
+    pub closed: Cell<Value>,
+    pub next: Option<NonNull<Self>>,
 }
 
 impl ObjUpvalue {
-    pub fn new(value: &Cell<Value>) -> Self {
+    pub fn new(value: *const Cell<Value>) -> Self {
         Self {
             obj: Obj::upvalue(),
-            location: value as *const Cell<Value>,
+            location: value,
+            closed: Cell::new(Value::Nil),
+            next: None,
         }
     }
 
@@ -266,5 +273,9 @@ impl ObjUpvalue {
     #[inline]
     pub fn into_ptr(self) -> NonNull<Self> {
         NonNull::new(Box::into_raw(Box::new(self))).unwrap()
+    }
+
+    pub fn value(&self) -> Value {
+        unsafe { (*self.location).get() }
     }
 }

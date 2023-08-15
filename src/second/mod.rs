@@ -98,6 +98,7 @@ pub struct Vm {
     // a little more overhead, and the same amount of pointer indirection?
     objects: HashSet<*mut Obj>,
     globals: HashMap<Value, Value>,
+    open_upvalues: Option<NonNull<ObjUpvalue>>,
 }
 
 impl Vm {
@@ -110,6 +111,7 @@ impl Vm {
             sp: 0,
             objects: HashSet::new(),
             globals: HashMap::new(),
+            open_upvalues: None,
         };
 
         vm.define_native("clock", 0, Value::clock);
@@ -301,6 +303,47 @@ impl Vm {
         Err(anyhow!("can only call functions and classes."))
     }
 
+    fn capture_upvalue(&mut self, local: *const Cell<Value>) -> *mut ObjUpvalue {
+        unsafe {
+            let mut prev = None;
+            let mut upvalue = self.open_upvalues;
+            while let Some(uv) = upvalue 
+            && (*uv.as_ptr()).location > local {
+                prev = upvalue;
+                upvalue = (*uv.as_ptr()).next;
+            }
+
+            if let Some(uv) = upvalue
+            && (*uv.as_ptr()).location == local {
+                return uv.as_ptr();
+            }
+
+            let mut created = ObjUpvalue::new(local);
+            created.next = upvalue;
+            let created = created.into_ptr();
+            self.objects.insert(created.cast().as_ptr());
+
+            match prev {
+                Some(uv) => (*uv.as_ptr()).next = Some(created),
+                None => self.open_upvalues = Some(created),
+            }
+
+            created.as_ptr()
+        }
+    }
+
+    fn close_upvalues(&mut self, last: *const Cell<Value>) {
+        unsafe {
+            while let Some(ref uv) = self.open_upvalues
+            && (*uv.as_ptr()).location >= last {
+                let val = (*(*uv.as_ptr()).location).get().clone();
+                (*uv.as_ptr()).closed.set(val);
+                (*uv.as_ptr()).location = &(*uv.as_ptr()).closed;
+                self.open_upvalues = (*uv.as_ptr()).next;
+            }
+        }
+    }
+
     pub fn run(&mut self, debug_trace: bool) -> Result<()> {
         unsafe {
             let mut frame = self.frames[self.frame_count - 1];
@@ -399,11 +442,11 @@ impl Vm {
                     }
                     OpCode::GetUpvalue => {
                         let slot = read_byte!() as usize;
-                        self.push((*(*(*frame.closure).upvalues[slot]).location).get());
+                        self.push((*(*(*frame.closure).upvalues[slot].as_ptr()).location).get());
                     }
                     OpCode::SetUpvalue => {
                         let slot = read_byte!() as usize;
-                        let upvalue = (*frame.closure).upvalues[slot] as *mut ObjUpvalue;
+                        let upvalue = (*frame.closure).upvalues[slot].as_ptr();
                         (*upvalue).set_value(self.peek(0));
                     }
                     OpCode::Equal => compare!(==),
@@ -451,18 +494,16 @@ impl Vm {
                             let closure = ObjClosure::new(o.cast()).into_ptr();
                             self.push(Value::Obj(closure.cast()));
                             let upvalues = &mut (*closure.as_ptr()).upvalues;
-                            for i in 0..upvalues.len() {
+                            for _ in 0..upvalues.capacity() {
                                 let is_local = read_byte!() == 1;
                                 let index = read_byte!() as usize;
                                 if is_local {
-                                    let upvalue =
-                                        ObjUpvalue::new(&self.stack[frame.starting_slot + index])
-                                            .into_ptr()
-                                            .as_ptr();
-                                    self.objects.insert(upvalue.cast());
-                                    upvalues[i] = upvalue as *const ObjUpvalue;
+                                    let val = &self.stack[frame.starting_slot + index]
+                                        as *const Cell<Value>;
+                                    let upvalue = self.capture_upvalue(val);
+                                    upvalues.push(NonNull::new(upvalue).unwrap());
                                 } else {
-                                    upvalues[i] = (*frame.closure).upvalues[index];
+                                    upvalues.push((*frame.closure).upvalues[index]);
                                 }
                             }
                             unsafe {
@@ -476,9 +517,27 @@ impl Vm {
                         }
                         _ => return Err(anyhow!(InterpretError::Runtime)),
                     },
-                    OpCode::CloseUpvalue => {}
+                    OpCode::CloseUpvalue => {
+                        let last = &self.stack[self.sp - 1] as *const _;
+                        while let Some(ref uv) = self.open_upvalues
+                        && (*uv.as_ptr()).location >= last {
+                            let val = (*(*uv.as_ptr()).location).get().clone();
+                            (*uv.as_ptr()).closed.set(val);
+                            (*uv.as_ptr()).location = &(*uv.as_ptr()).closed;
+                            self.open_upvalues = (*uv.as_ptr()).next;
+                        }
+                        self.pop();
+                    }
                     OpCode::Return => {
                         let result = self.pop();
+                        let last = &self.stack[frame.starting_slot] as *const _;
+                        while let Some(ref uv) = self.open_upvalues
+                        && (*uv.as_ptr()).location >= last {
+                            let val = (*(*uv.as_ptr()).location).get().clone();
+                            (*uv.as_ptr()).closed.set(val);
+                            (*uv.as_ptr()).location = &(*uv.as_ptr()).closed;
+                            self.open_upvalues = (*uv.as_ptr()).next;
+                        }
                         self.frame_count -= 1;
                         if self.frame_count == 0 {
                             self.pop();
@@ -502,20 +561,22 @@ mod tests {
         collections::{hash_map::DefaultHasher, HashSet},
         hash::Hasher,
     };
+
     #[test]
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
         let source = r#"
-        var x = 1;
-        
         fun outer() {
             var x = "outside";
             fun inner() {
                 print x;
             }
-            inner();
+            
+            return inner;
         }
-        outer();
+        
+        var closure = outer();
+        closure();
         "#;
         vm.interpret(source)?;
         vm.free_objects();
