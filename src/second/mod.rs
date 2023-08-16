@@ -471,9 +471,13 @@ impl Vm {
                                         let val = &self.stack[frame.starting_slot + index]
                                             as *const Cell<Value>;
                                         let upvalue = self.capture_upvalue(val);
-                                        (*closure.as_ptr()).upvalues.push(NonNull::new(upvalue).unwrap());
+                                        (*closure.as_ptr())
+                                            .upvalues
+                                            .push(NonNull::new(upvalue).unwrap());
                                     } else {
-                                        (*closure.as_ptr()).upvalues.push((*frame.closure).upvalues[index]);
+                                        (*closure.as_ptr())
+                                            .upvalues
+                                            .push((*frame.closure).upvalues[index]);
                                     }
                                 }
                             }

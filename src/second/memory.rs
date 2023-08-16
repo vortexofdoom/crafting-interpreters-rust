@@ -1,4 +1,11 @@
-use std::{ptr::NonNull, alloc::{GlobalAlloc, System, Allocator, AllocError}, sync::atomic::{AtomicUsize, Ordering}};
+use std::{
+    alloc::{GlobalAlloc, System},
+    ptr::{slice_from_raw_parts, NonNull},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+};
 
 use super::{
     object::{IsObj, Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
@@ -8,26 +15,29 @@ use super::{
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static NEXT_GC: AtomicUsize = AtomicUsize::new(1024 * 1024);
+#[global_allocator]
+static ALLOC: LoxAlloc = LoxAlloc;
 
-// unsafe impl Allocator for Heap {
-//     fn allocate(&self, layout: std::alloc::Layout) -> Result<NonNull<[u8]>, std::alloc::AllocError> {
-//         let ret = System.alloc(layout);
-//         if !ret.is_null() {
-//             ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
-//         }
-//         NonNull::new(ret).ok_or(AllocError)
-//     }
+unsafe impl GlobalAlloc for LoxAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let ret = System.alloc(layout);
+        if !ret.is_null() {
+            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        ret
+    }
 
-//     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: std::alloc::Layout) {
-//         System.dealloc(ptr, layout);
-//         ALLOCATED.fetch_sub(layout.size(), Ordering::Relaxed);
-//     }
-// }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        System.dealloc(ptr, layout);
+        ALLOCATED.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug)]
+pub struct LoxAlloc;
 
 #[derive(Debug)]
 pub struct Heap {
-    pub bytes_allocated: usize,
-    next_gc: usize,
     pub objects: Option<NonNull<Obj>>,
     pub graystack: Vec<NonNull<Obj>>,
 }
@@ -35,24 +45,22 @@ pub struct Heap {
 impl Heap {
     pub fn new() -> Self {
         Self {
-            bytes_allocated: 0,
-            next_gc: 1024 * 1024,
             objects: None,
             graystack: vec![],
         }
     }
 
-
     pub fn new_obj<T: IsObj>(&mut self, mut obj: T) -> NonNull<Obj> {
-        //self.collect_garbage();
         let size = obj.size();
         let mut new: NonNull<Obj> = NonNull::new(Box::into_raw(Box::new(obj)).cast()).unwrap();
         unsafe {
             (*new.as_ptr()).next = self.objects;
             self.objects = Some(new);
         }
-        self.bytes_allocated += size;
-        //println!("allocated {size}, Total: {}", self.bytes_allocated);
+        println!(
+            "allocated {size}, Total: {}",
+            ALLOCATED.load(Ordering::Relaxed)
+        );
         new
     }
 
@@ -154,8 +162,7 @@ impl Heap {
     }
 
     pub fn sweep(&mut self) {
-        let prev_bytes = self.bytes_allocated;
-        self.bytes_allocated = 0;
+        let prev_bytes = ALLOCATED.load(Ordering::Relaxed);
         let mut prev = None;
         let mut object = self.objects;
         while let Some(obj) = object {
@@ -163,14 +170,6 @@ impl Heap {
             unsafe {
                 if (*o).is_marked {
                     (*o).is_marked = false;
-
-                    self.bytes_allocated += match (*o).kind {
-                        ObjType::String => (*o.cast::<ObjString>()).size(),
-                        ObjType::Function => (*o.cast::<ObjFunction>()).size(),
-                        ObjType::Native => (*o.cast::<ObjNative>()).size(),
-                        ObjType::Closure => (*o.cast::<ObjClosure>()).size(),
-                        ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).size(),
-                    };
                     prev = Some(obj);
                     object = (*o).next;
                 } else {
@@ -184,6 +183,9 @@ impl Heap {
                 }
             }
         }
-        println!("finished GC. Prev bytes: {prev_bytes}, current bytes: {}", self.bytes_allocated);
+        println!(
+            "finished GC. Prev bytes: {prev_bytes}, current bytes: {}",
+            ALLOCATED.load(Ordering::Relaxed)
+        );
     }
 }

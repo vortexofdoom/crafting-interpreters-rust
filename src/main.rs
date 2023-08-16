@@ -1,5 +1,4 @@
 #![feature(let_chains)]
-#![feature(allocator_api)]
 #![allow(non_upper_case_globals, unused)]
 mod first;
 mod second;

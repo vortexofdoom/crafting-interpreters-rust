@@ -1,9 +1,10 @@
 use std::{
     cell::Cell,
     hash::Hash,
+    marker::PhantomData,
     ops::Deref,
     ptr::NonNull,
-    time::{SystemTime, UNIX_EPOCH}, alloc::{Global, Allocator},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Result};
@@ -11,6 +12,7 @@ use datasize::DataSize;
 
 use super::{
     chunk::Chunk,
+    memory::Heap,
     object::{Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
 };
 

@@ -437,12 +437,11 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn inc_arity(&mut self) -> Result<()> {
         unsafe {
             let overflow;
-            (
-                (*self.current_compiler.as_ptr()).function.arity,
-                overflow,
-            ) = (*self.current_compiler.as_ptr()).function
-                .arity
-                .overflowing_add(1);
+            ((*self.current_compiler.as_ptr()).function.arity, overflow) =
+                (*self.current_compiler.as_ptr())
+                    .function
+                    .arity
+                    .overflowing_add(1);
             if overflow {
                 return Err(anyhow!("Can't have more than 255 parameters."));
             }
@@ -591,10 +590,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn resolve_upvalue(&mut self, compiler: NonNull<Compiler>, name: &str) -> Result<Option<u8>> {
         unsafe {
             let compiler = compiler.as_ptr();
-            let fun_name = (*compiler).function
-                .name
-                .clone()
-                .unwrap_or("".to_owned());
+            let fun_name = (*compiler).function.name.clone().unwrap_or("".to_owned());
             if let Some(enclosing) = (*compiler).enclosing {
                 if let Some(local) = self.resolve_local(enclosing, name)? {
                     let l = &mut (*enclosing.as_ptr()).locals[local as usize];
