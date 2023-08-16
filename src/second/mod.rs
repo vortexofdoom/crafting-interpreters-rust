@@ -106,6 +106,7 @@ pub struct Vm {
 impl Vm {
     const DEFAULT_VAL: Cell<Value> = Cell::new(Value::Nil);
     pub fn new() -> Self {
+        let frames = [CallFrame::default(); FRAMES_MAX];
         let mut vm = Self {
             frames: [CallFrame::default(); FRAMES_MAX],
             frame_count: 0,
@@ -163,68 +164,15 @@ impl Vm {
     }
 
     pub fn collect_garbage(&mut self) {
-        self.mark_roots();
-    }
-
-    fn mark_roots(&mut self) {
-        unsafe {
-            for val in &self.stack[..self.sp] {
-                self.mark_value(val.get());
-            }
-
-            for (name, value) in self.globals.iter() {
-                self.mark_value(*name);
-                self.mark_value(*value);
-            }
-
-            for frame in &self.frames[..self.frame_count] {
-                self.mark_obj(frame.closure.cast_mut().cast())
-            }
-
-            let mut upvalue = self.open_upvalues.clone();
-            while let Some(uv) = upvalue {
-                self.mark_obj(uv.as_ptr().cast());
-                upvalue = Some(uv);
-            }
-
-            let mut objects = self.heap.objects;
-            while let Some(obj) = objects {
-                if (*obj.as_ptr()).is_marked {
-                    println!("{} is marked", Value::Obj(obj));
-                } else {
-                    println!("{} is not marked", Value::Obj(obj));
-                }
-                objects = (*obj.as_ptr()).next;
-            }
-        }
-    }
-
-    fn mark_value(&self, value: Value) {
-        if let Value::Obj(o) = value {
-            unsafe {
-                self.mark_obj(o.as_ptr());
-            }
-        }
-    }
-
-    fn mark_obj(&self, obj: *mut Obj) {
-        unsafe {
-            (*obj).is_marked = true;
-        }
+        println!("starting garbage collection");
+        let vm = self as *const Vm;
+        self.heap.mark_vm_roots(vm);
+        self.heap.trace_references();
+        self.heap.sweep();
     }
 
     pub fn free_objects(&mut self) {
         self.heap.free_objects();
-    }
-
-    unsafe fn free_object(&mut self, obj: *mut Obj) {
-        match (*obj).kind {
-            ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
-            ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
-            ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
-            ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
-            ObjType::Upvalue => drop(Box::from_raw(obj.cast::<ObjUpvalue>())),
-        };
     }
 
     #[inline]
@@ -335,6 +283,7 @@ impl Vm {
                 return uv.as_ptr();
             }
 
+            self.collect_garbage();
             let mut created = ObjUpvalue::new(local);
             created.next = upvalue;
             let created = self.heap.new_obj(created).cast();
@@ -505,29 +454,32 @@ impl Vm {
                         self.call_value(self.peek(arg_count as usize), arg_count)?;
                         frame = self.frames[self.frame_count - 1];
                     }
-                    OpCode::Closure => match read_constant!() {
-                        Value::Obj(o) => {
-                            let closure = self
-                                .heap
-                                .new_obj(ObjClosure::new(o.cast()))
-                                .cast::<ObjClosure>();
-                            self.push(Value::Obj(closure.cast()));
-                            let upvalues = &mut (*closure.as_ptr()).upvalues;
-                            for _ in 0..upvalues.capacity() {
-                                let is_local = read_byte!() == 1;
-                                let index = read_byte!() as usize;
-                                if is_local {
-                                    let val = &self.stack[frame.starting_slot + index]
-                                        as *const Cell<Value>;
-                                    let upvalue = self.capture_upvalue(val);
-                                    upvalues.push(NonNull::new(upvalue).unwrap());
-                                } else {
-                                    upvalues.push((*frame.closure).upvalues[index]);
+                    OpCode::Closure => {
+                        self.collect_garbage();
+                        match read_constant!() {
+                            Value::Obj(o) => {
+                                let closure = self
+                                    .heap
+                                    .new_obj(ObjClosure::new(o.cast()))
+                                    .cast::<ObjClosure>();
+                                self.push(Value::Obj(closure.cast()));
+                                let capacity = (*closure.as_ptr()).upvalues.capacity();
+                                for _ in 0..capacity {
+                                    let is_local = read_byte!() == 1;
+                                    let index = read_byte!() as usize;
+                                    if is_local {
+                                        let val = &self.stack[frame.starting_slot + index]
+                                            as *const Cell<Value>;
+                                        let upvalue = self.capture_upvalue(val);
+                                        (*closure.as_ptr()).upvalues.push(NonNull::new(upvalue).unwrap());
+                                    } else {
+                                        (*closure.as_ptr()).upvalues.push((*frame.closure).upvalues[index]);
+                                    }
                                 }
                             }
+                            _ => return Err(anyhow!(InterpretError::Runtime)),
                         }
-                        _ => return Err(anyhow!(InterpretError::Runtime)),
-                    },
+                    }
                     OpCode::CloseUpvalue => {
                         let last = &self.stack[self.sp - 1] as *const _;
                         while let Some(ref uv) = self.open_upvalues
@@ -577,17 +529,21 @@ mod tests {
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
         let source = r#"
-        fun outer() {
-            var x = "outside";
-            fun inner() {
-                print x;
+        {
+            fun outer() {
+                var x = "outside";
+                fun inner() {
+                    print x;
+                }
+                return inner;
             }
-            
-            return inner;
+            var closure = outer();
+            closure();
         }
-        
-        var closure = outer();
-        closure();
+
+        var hi = "hello";
+        hi = hi + 3;
+        print hi;
         "#;
         vm.interpret(source)?;
         vm.collect_garbage();

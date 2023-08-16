@@ -1,3 +1,4 @@
+use datasize::DataSize;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::value::Value;
@@ -38,7 +39,7 @@ pub enum OpCode {
     Return,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, DataSize)]
 pub struct Chunk {
     code: Vec<u8>,
     lines: Vec<usize>,
@@ -53,6 +54,11 @@ impl Chunk {
     #[inline]
     pub fn code(&self) -> &[u8] {
         &self.code
+    }
+
+    #[inline]
+    pub fn lines(&self) -> &[usize] {
+        &self.lines
     }
 
     #[inline]

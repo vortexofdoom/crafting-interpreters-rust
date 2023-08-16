@@ -202,7 +202,7 @@ struct UpValue {
 
 #[derive(Debug)]
 pub struct Compiler<'a> {
-    pub function: NonNull<ObjFunction>,
+    pub function: Box<ObjFunction>,
     fun_type: FunctionType,
     enclosing: Option<NonNull<Self>>,
     locals: [Local<'a>; 256],
@@ -215,9 +215,8 @@ impl<'a> Compiler<'a> {
     const MAX_LOCALS: usize = 256;
 
     fn new(enclosing: NonNull<Self>, fun_type: FunctionType, heap: &mut Heap) -> Self {
-        let function = heap.new_obj(ObjFunction::new()).cast();
         let mut compiler = Self {
-            function,
+            function: Box::new(ObjFunction::new()),
             fun_type,
             enclosing: Some(enclosing),
             locals: [Local::default(); 256],
@@ -231,14 +230,8 @@ impl<'a> Compiler<'a> {
         compiler
     }
 
-    fn function(&mut self) -> *mut ObjFunction {
-        unsafe { self.function.as_ptr() }
-    }
-
-    fn set_function_name(&mut self, name: &str) {
-        unsafe {
-            (*self.function.as_ptr()).name = Some(String::from(name));
-        }
+    fn finish(self) -> Box<ObjFunction> {
+        self.function
     }
 
     #[inline]
@@ -248,8 +241,8 @@ impl<'a> Compiler<'a> {
 
     fn add_upvalue(&mut self, index: u8, is_local: bool) -> Result<u8> {
         unsafe {
-            let function = self.function.as_ptr();
-            let count = (*function).upvalue_count;
+            let function = &mut self.function;
+            let count = function.upvalue_count;
 
             for i in 0..count {
                 let upvalue = self.upvalues[i as usize];
@@ -261,7 +254,7 @@ impl<'a> Compiler<'a> {
             self.upvalues[count as usize].index = index;
             self.upvalues[count as usize].is_local = is_local;
             let overflow;
-            ((*function).upvalue_count, overflow) = count.overflowing_add(1);
+            (function.upvalue_count, overflow) = count.overflowing_add(1);
             if overflow {
                 return Err(anyhow!("Too many upvalues"));
             }
@@ -338,7 +331,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
     #[inline]
     fn chunk(&mut self) -> &mut Chunk {
-        unsafe { &mut (*(*self.current_compiler.as_ptr()).function.as_ptr()).chunk }
+        unsafe { &mut (*self.current_compiler.as_ptr()).function.chunk }
     }
 
     fn current(&mut self) -> Option<Result<(usize, Token)>> {
@@ -445,9 +438,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         unsafe {
             let overflow;
             (
-                (*(*self.current_compiler.as_ptr()).function.as_ptr()).arity,
+                (*self.current_compiler.as_ptr()).function.arity,
                 overflow,
-            ) = (*(*self.current_compiler.as_ptr()).function.as_ptr())
+            ) = (*self.current_compiler.as_ptr()).function
                 .arity
                 .overflowing_add(1);
             if overflow {
@@ -463,7 +456,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let Some((_, Token::Identifier(name))) = self.prev else {
             unreachable!()
         };
-        compiler.set_function_name(name);
+        compiler.function.name = Some(name.to_string());
         self.current_compiler = NonNull::new(&mut compiler as *mut Compiler).unwrap();
         self.begin_scope();
         self.consume_token(LeftParen)?;
@@ -486,16 +479,14 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.emit_return();
         unsafe {
             // end compiler
-            let function = (*self.current_compiler.as_ptr()).function;
-            let compiler = self.current_compiler.as_ptr();
             self.current_compiler = (*self.current_compiler.as_ptr()).enclosing.unwrap();
-
+            let function = self.heap.new_obj(*compiler.function);
             let constant = self.chunk().add_constant(Value::Obj(function.cast()));
             self.emit_byte(OpCode::Closure);
             self.emit_byte(constant);
-            for i in (0..(*function.as_ptr()).upvalue_count as usize) {
-                self.emit_byte((*compiler).upvalues[i].is_local);
-                self.emit_byte((*compiler).upvalues[i].index);
+            for i in (0..(*function.as_ptr().cast::<ObjFunction>()).upvalue_count as usize) {
+                self.emit_byte(compiler.upvalues[i].is_local);
+                self.emit_byte(compiler.upvalues[i].index);
             }
         }
         Ok(())
@@ -600,7 +591,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn resolve_upvalue(&mut self, compiler: NonNull<Compiler>, name: &str) -> Result<Option<u8>> {
         unsafe {
             let compiler = compiler.as_ptr();
-            let fun_name = (*(*compiler).function())
+            let fun_name = (*compiler).function
                 .name
                 .clone()
                 .unwrap_or("".to_owned());
@@ -975,7 +966,7 @@ pub fn compile(source: &str, heap: &mut Heap) -> Result<NonNull<ObjFunction>> {
     //     println!("Token: {token}");
     // }
     let mut compiler = Compiler {
-        function: heap.new_obj(ObjFunction::new()).cast(),
+        function: Box::new(ObjFunction::new()),
         fun_type: FunctionType::Script,
         enclosing: None,
         locals: [Local::default(); 256],
@@ -1000,6 +991,8 @@ pub fn compile(source: &str, heap: &mut Heap) -> Result<NonNull<ObjFunction>> {
     }
 
     parser.emit_return();
-
-    return Ok(compiler.function);
+    let function = compiler.finish();
+    drop(parser);
+    let function = heap.new_obj(*function).cast();
+    return Ok(function);
 }

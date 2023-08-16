@@ -3,14 +3,15 @@ use std::{
     hash::Hash,
     ops::Deref,
     ptr::NonNull,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH}, alloc::{Global, Allocator},
 };
 
 use anyhow::{anyhow, Result};
+use datasize::DataSize;
 
 use super::{
     chunk::Chunk,
-    object::{Obj, ObjClosure, ObjFunction, ObjString, ObjType, ObjUpvalue},
+    object::{Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +20,28 @@ pub enum Value {
     Number(f64),
     Obj(NonNull<Obj>),
     Nil,
+}
+
+impl DataSize for Value {
+    const IS_DYNAMIC: bool = true;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        match self {
+            Value::Obj(o) => unsafe {
+                let o = o.as_ptr();
+                match (*o).kind {
+                    ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
+                    ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
+                    ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
+                    ObjType::Closure => (*o.cast::<ObjClosure>()).estimate_heap_size(),
+                    ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).estimate_heap_size(),
+                }
+            },
+            _ => 0,
+        }
+    }
 }
 
 impl Eq for Value {}
@@ -95,6 +118,7 @@ impl std::ops::Add for Value {
                 (Value::Obj(o), _) | (_, Value::Obj(o))
                     if (*o.as_ptr()).kind == ObjType::String =>
                 {
+                    // this memory is leaked atm, either need a custom allocator or a hack.
                     let new_string = ObjString::new(format!("{self}{rhs}"));
                     let ptr = NonNull::new(Box::into_raw(Box::new(new_string)))
                         .unwrap()

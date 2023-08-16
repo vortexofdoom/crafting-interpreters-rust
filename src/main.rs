@@ -1,4 +1,5 @@
 #![feature(let_chains)]
+#![feature(allocator_api)]
 #![allow(non_upper_case_globals, unused)]
 mod first;
 mod second;
@@ -22,7 +23,6 @@ fn main() -> Result<()> {
     } else {
         vm.run_prompt()?;
     }
-    vm.collect_garbage();
     vm.free_objects();
     Ok(())
 }

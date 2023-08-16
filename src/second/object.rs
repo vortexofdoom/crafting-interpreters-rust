@@ -1,8 +1,10 @@
 use std::{cell::Cell, ptr::NonNull};
 
+use datasize::DataSize;
+
 use super::{chunk::Chunk, value::Value};
 
-pub trait IsObj {
+pub trait IsObj: DataSize + Sized {
     fn kind(&self) -> ObjType;
 
     fn as_obj_ptr(&self) -> NonNull<Obj> {
@@ -10,6 +12,10 @@ pub trait IsObj {
     }
 
     fn obj(&mut self) -> &mut Obj;
+
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.estimate_heap_size()
+    }
 }
 
 macro_rules! impl_IsObj {
@@ -32,16 +38,6 @@ impl_IsObj!(String, ObjString);
 impl_IsObj!(Native, ObjNative);
 impl_IsObj!(Upvalue, ObjUpvalue);
 
-impl IsObj for Obj {
-    fn kind(&self) -> ObjType {
-        self.kind
-    }
-
-    fn obj(&mut self) -> &mut Obj {
-        self
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum ObjType {
     String,
@@ -57,6 +53,16 @@ pub struct Obj {
     pub kind: ObjType,
     pub is_marked: bool,
     pub next: Option<NonNull<Obj>>,
+}
+
+impl DataSize for Obj {
+    const IS_DYNAMIC: bool = false;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        0
+    }
 }
 
 impl Obj {
@@ -115,7 +121,7 @@ impl Obj {
 /// Inlining length and turning it into a dynamically sized type could increase performance
 /// TODO: Figure out how to format raw strs/byte arrays
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DataSize)]
 pub struct ObjString {
     obj: Obj,
     // This is an extra word in heap memory vs the book's representation,
@@ -168,7 +174,7 @@ pub enum FunctionType {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DataSize)]
 pub struct ObjFunction {
     pub obj: Obj,
     pub arity: u8,
@@ -213,6 +219,16 @@ pub struct ObjNative {
     function: fn(Option<&[Cell<Value>]>) -> Value,
 }
 
+impl DataSize for ObjNative {
+    const IS_DYNAMIC: bool = false;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        0
+    }
+}
+
 impl ObjNative {
     #[inline]
     pub fn new(arity: usize, function: fn(Option<&[Cell<Value>]>) -> Value) -> Self {
@@ -240,6 +256,16 @@ pub struct ObjClosure {
     obj: Obj,
     pub function: NonNull<ObjFunction>,
     pub upvalues: Vec<NonNull<ObjUpvalue>>,
+}
+
+impl DataSize for ObjClosure {
+    const IS_DYNAMIC: bool = true;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        (&self.upvalues).estimate_heap_size()
+    }
 }
 
 impl std::fmt::Display for ObjClosure {
@@ -273,6 +299,19 @@ pub struct ObjUpvalue {
     pub location: *const Cell<Value>,
     pub closed: Cell<Value>,
     pub next: Option<NonNull<Self>>,
+}
+
+impl DataSize for ObjUpvalue {
+    fn estimate_heap_size(&self) -> usize {
+        match self.closed.get() {
+            Value::Obj(o) => unsafe { (*o.as_ptr()).estimate_heap_size() },
+            _ => 0,
+        }
+    }
+
+    const IS_DYNAMIC: bool = true;
+
+    const STATIC_HEAP_SIZE: usize = 0;
 }
 
 impl ObjUpvalue {
