@@ -5,7 +5,8 @@ use enum_map::{Enum, EnumMap};
 
 use super::{
     chunk::{Chunk, OpCode},
-    object::{FunctionType, ObjFunction},
+    memory::Heap,
+    object::{FunctionType, Obj, ObjFunction, ObjString},
     scanner::{
         scan, Parsed, Token,
         TokenType::{self, *},
@@ -199,9 +200,9 @@ struct UpValue {
     is_local: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Compiler<'a> {
-    function: NonNull<ObjFunction>,
+#[derive(Debug)]
+pub struct Compiler<'a> {
+    pub function: NonNull<ObjFunction>,
     fun_type: FunctionType,
     enclosing: Option<NonNull<Self>>,
     locals: [Local<'a>; 256],
@@ -213,25 +214,10 @@ struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     const MAX_LOCALS: usize = 256;
 
-    fn new() -> Self {
+    fn new(enclosing: NonNull<Self>, fun_type: FunctionType, heap: &mut Heap) -> Self {
+        let function = heap.new_obj(ObjFunction::new()).cast();
         let mut compiler = Self {
-            function: NonNull::new(Box::into_raw(Box::new(ObjFunction::new()))).unwrap(),
-            fun_type: FunctionType::Script,
-            enclosing: None,
-            locals: [Local::default(); 256],
-            upvalues: [UpValue::default(); 256],
-            local_count: 1,
-            scope_depth: 0,
-        };
-
-        compiler.locals[0] = Local::new("", 0, false);
-
-        compiler
-    }
-
-    fn new_enclosed(enclosing: NonNull<Self>, fun_type: FunctionType) -> Self {
-        let mut compiler = Self {
-            function: NonNull::new(Box::into_raw(Box::new(ObjFunction::new()))).unwrap(),
+            function,
             fun_type,
             enclosing: Some(enclosing),
             locals: [Local::default(); 256],
@@ -288,6 +274,7 @@ struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
     prev: Option<(usize, Token<'a>)>,
     current_compiler: NonNull<Compiler<'a>>,
     tokens: Peekable<T>,
+    heap: &'a mut Heap,
 }
 
 // Can probably do everything with peek() instead of keeping the previous token, but we'll find out
@@ -389,6 +376,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
     }
 
+    pub fn parse(&mut self) {
+        while self.tokens.peek().is_some() {
+            if let Err(e) = self.declaration() {
+                self.synchronize();
+                println!("{e}");
+            }
+        }
+
+        self.emit_return();
+    }
+
     fn synchronize(&mut self) {
         while let Some(Parsed(_, Ok(t))) = self.tokens.peek() {
             if self.prev.unwrap().1 == Token::Semicolon {
@@ -426,14 +424,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn fun_dec(&mut self) -> Result<()> {
-        let (global, line) = self.parse_variable()?;
-        let mut compiler = unsafe { *self.current_compiler.as_ptr() };
-        if compiler.scope_depth != 0 {
-            compiler.locals[compiler.local_count() - 1].depth = compiler.scope_depth as isize;
+        unsafe {
+            let (global, line) = self.parse_variable()?;
+            let mut compiler = unsafe { self.current_compiler.as_ptr() };
+            if (*compiler).scope_depth != 0 {
+                (*compiler).locals[(*compiler).local_count() - 1].depth =
+                    (*compiler).scope_depth as isize;
+            }
+            self.function(FunctionType::Function)?;
+            self.define_variable(global)?;
+            Ok(())
         }
-        self.function(FunctionType::Function)?;
-        self.define_variable(global)?;
-        Ok(())
     }
 
     fn init_compiler(&mut self, fun_type: FunctionType) -> Result<()> {
@@ -458,7 +459,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn function(&mut self, fun_type: FunctionType) -> Result<()> {
         let enclosing = self.current_compiler;
-        let mut compiler = Compiler::new_enclosed(enclosing, fun_type);
+        let mut compiler = Compiler::new(enclosing, fun_type, &mut self.heap);
         let Some((_, Token::Identifier(name))) = self.prev else {
             unreachable!()
         };
@@ -521,9 +522,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         };
 
         self.declare_variable()?;
-        let string = s.to_string();
-
-        Ok((self.chunk().add_constant(Value::new_string(string)), l))
+        let string = self.heap.new_obj(ObjString::new(s.to_string())).cast();
+        Ok((self.chunk().add_constant(Value::Obj(string)), l))
     }
 
     fn mark_initialized(&mut self) -> Result<()> {
@@ -630,9 +630,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             } else if let Some(i) = self.resolve_upvalue(self.current_compiler, name)? {
                 (i, OpCode::GetUpvalue, OpCode::SetUpvalue)
             } else {
+                let obj = self.heap.new_obj(ObjString::new(name.to_string()));
                 (
-                    self.chunk()
-                        .add_constant(Value::new_string(name.to_string())),
+                    self.chunk().add_constant(Value::Obj(obj)),
                     OpCode::GetGlobal,
                     OpCode::SetGlobal,
                 )
@@ -837,7 +837,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             .expect("should only call string when there is a token");
         match token {
             Token::String(s) => {
-                let constant = self.chunk().add_constant(Value::new_string(s.to_string()));
+                let obj = self.heap.new_obj(ObjString::new(s.to_string())).cast();
+                let constant = self.chunk().add_constant(Value::Obj(obj));
                 self.chunk().write(OpCode::Constant, line);
                 self.chunk().write(constant, line);
                 Ok(())
@@ -969,16 +970,26 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 }
 
-pub fn compile(source: &str) -> Result<NonNull<ObjFunction>> {
+pub fn compile(source: &str, heap: &mut Heap) -> Result<NonNull<ObjFunction>> {
     // for token in scan(source) {
     //     println!("Token: {token}");
     // }
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler {
+        function: heap.new_obj(ObjFunction::new()).cast(),
+        fun_type: FunctionType::Script,
+        enclosing: None,
+        locals: [Local::default(); 256],
+        upvalues: [UpValue::default(); 256],
+        local_count: 1,
+        scope_depth: 0,
+    };
 
+    compiler.locals[0] = Local::new("", 0, false);
     let mut parser = Parser {
         prev: None,
         current_compiler: NonNull::new(&mut compiler as *mut Compiler).unwrap(),
         tokens: scan(source),
+        heap,
     };
 
     while parser.tokens.peek().is_some() {

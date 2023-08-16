@@ -3,8 +3,42 @@ use std::{cell::Cell, ptr::NonNull};
 use super::{chunk::Chunk, value::Value};
 
 pub trait IsObj {
+    fn kind(&self) -> ObjType;
+
     fn as_obj_ptr(&self) -> NonNull<Obj> {
         NonNull::from(self).cast()
+    }
+
+    fn obj(&mut self) -> &mut Obj;
+}
+
+macro_rules! impl_IsObj {
+    ($name:tt, $struct:tt) => {
+        impl IsObj for $struct {
+            fn kind(&self) -> ObjType {
+                ObjType::$name
+            }
+
+            fn obj(&mut self) -> &mut Obj {
+                &mut self.obj
+            }
+        }
+    };
+}
+
+impl_IsObj!(Closure, ObjClosure);
+impl_IsObj!(Function, ObjFunction);
+impl_IsObj!(String, ObjString);
+impl_IsObj!(Native, ObjNative);
+impl_IsObj!(Upvalue, ObjUpvalue);
+
+impl IsObj for Obj {
+    fn kind(&self) -> ObjType {
+        self.kind
+    }
+
+    fn obj(&mut self) -> &mut Obj {
+        self
     }
 }
 
@@ -21,6 +55,7 @@ pub enum ObjType {
 #[derive(Debug, Clone, Copy)]
 pub struct Obj {
     pub kind: ObjType,
+    pub is_marked: bool,
     pub next: Option<NonNull<Obj>>,
 }
 
@@ -29,6 +64,7 @@ impl Obj {
     fn string() -> Self {
         Self {
             kind: ObjType::String,
+            is_marked: false,
             next: None,
         }
     }
@@ -37,6 +73,7 @@ impl Obj {
     fn function() -> Self {
         Self {
             kind: ObjType::Function,
+            is_marked: false,
             next: None,
         }
     }
@@ -45,13 +82,25 @@ impl Obj {
     fn closure() -> Self {
         Self {
             kind: ObjType::Closure,
+            is_marked: false,
             next: None,
         }
     }
 
+    #[inline]
+    fn native() -> Self {
+        Self {
+            kind: ObjType::Native,
+            is_marked: false,
+            next: None,
+        }
+    }
+
+    #[inline]
     fn upvalue() -> Self {
         Self {
             kind: ObjType::Upvalue,
+            is_marked: false,
             next: None,
         }
     }
@@ -82,8 +131,6 @@ impl std::hash::Hash for ObjString {
     }
 }
 
-impl IsObj for ObjString {}
-
 impl ObjString {
     #[inline]
     pub fn new(string: String) -> Self {
@@ -91,11 +138,6 @@ impl ObjString {
             obj: Obj::string(),
             string,
         }
-    }
-
-    #[inline]
-    pub fn into_ptr(self) -> NonNull<Self> {
-        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 }
 
@@ -154,20 +196,12 @@ impl ObjFunction {
     #[inline]
     pub fn new() -> Self {
         Self {
-            obj: Obj {
-                kind: ObjType::Function,
-                next: None,
-            },
+            obj: Obj::function(),
             arity: 0,
             upvalue_count: 0,
             chunk: Chunk::new(),
             name: None,
         }
-    }
-
-    #[inline]
-    pub fn into_ptr(self) -> NonNull<Self> {
-        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 }
 
@@ -183,10 +217,7 @@ impl ObjNative {
     #[inline]
     pub fn new(arity: usize, function: fn(Option<&[Cell<Value>]>) -> Value) -> Self {
         Self {
-            obj: Obj {
-                kind: ObjType::Native,
-                next: None,
-            },
+            obj: Obj::native(),
             arity,
             function,
         }
@@ -200,11 +231,6 @@ impl ObjNative {
     #[inline]
     pub fn arity(&self) -> usize {
         self.arity
-    }
-
-    #[inline]
-    pub fn into_ptr(self) -> NonNull<Self> {
-        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 }
 
@@ -238,11 +264,6 @@ impl ObjClosure {
     pub fn function(&self) -> &ObjFunction {
         unsafe { self.function.as_ref() }
     }
-
-    #[inline]
-    pub fn into_ptr(self) -> NonNull<Self> {
-        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
-    }
 }
 
 #[repr(C)]
@@ -268,11 +289,6 @@ impl ObjUpvalue {
         unsafe {
             (*self.location).set(value);
         }
-    }
-
-    #[inline]
-    pub fn into_ptr(self) -> NonNull<Self> {
-        NonNull::new(Box::into_raw(Box::new(self))).unwrap()
     }
 
     pub fn value(&self) -> Value {

@@ -70,8 +70,14 @@ impl std::fmt::Display for Value {
                     ObjType::String => write!(f, "{}", o.cast::<ObjString>().as_ref()),
                     ObjType::Function => write!(f, "{}", o.cast::<ObjFunction>().as_ref()),
                     ObjType::Native => write!(f, "<native fn>"),
+                    // This will never actually print in user generated code,
+                    // but for debugging purposes it can help to know we're looking at an upvalue.
                     ObjType::Upvalue => write!(f, "upvalue"),
-                    _ => unreachable!(),
+                    ObjType::Closure => write!(
+                        f,
+                        "{}",
+                        (*o.cast::<ObjClosure>().as_ptr()).function.as_ref()
+                    ),
                 }
             },
             Value::Nil => write!(f, "nil"),

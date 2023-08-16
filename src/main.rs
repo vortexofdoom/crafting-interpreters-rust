@@ -22,6 +22,7 @@ fn main() -> Result<()> {
     } else {
         vm.run_prompt()?;
     }
+    vm.collect_garbage();
     vm.free_objects();
     Ok(())
 }

@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod compiler;
 pub mod debug;
+pub mod memory;
 pub mod object;
 pub mod scanner;
 pub mod value;
@@ -21,6 +22,7 @@ use compiler::compile;
 
 use self::{
     debug::disassemble_instruction,
+    memory::Heap,
     object::{Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
     value::Value,
 };
@@ -96,7 +98,7 @@ pub struct Vm {
     // since the only reliable time to append to the list was on every push, which means double free if not careful
     // Probably worth revisiting for performance, but maybe it's not even that bad, as iteration only has
     // a little more overhead, and the same amount of pointer indirection?
-    objects: HashSet<*mut Obj>,
+    heap: Heap,
     globals: HashMap<Value, Value>,
     open_upvalues: Option<NonNull<ObjUpvalue>>,
 }
@@ -109,7 +111,7 @@ impl Vm {
             frame_count: 0,
             stack: [Self::DEFAULT_VAL; STACK_MAX],
             sp: 0,
-            objects: HashSet::new(),
+            heap: Heap::new(),
             globals: HashMap::new(),
             open_upvalues: None,
         };
@@ -124,34 +126,19 @@ impl Vm {
         arity: usize,
         function: fn(Option<&[Cell<Value>]>) -> Value,
     ) {
-        let n = ObjString::new(String::from(name));
-        let f = ObjNative::new(arity, function);
-        let name = Box::into_raw(Box::new(n)).cast();
-        let native = Box::into_raw(Box::new(f)).cast();
-        self.objects.insert(name);
-        self.objects.insert(native);
-        let name = NonNull::new(name).unwrap();
-        let native = NonNull::new(native).unwrap();
+        let name = self.heap.new_obj(ObjString::new(String::from(name)));
+        let native = self.heap.new_obj(ObjNative::new(arity, function));
         self.globals.insert(Value::Obj(name), Value::Obj(native));
     }
 
     pub fn interpret(&mut self, source: &str) -> Result<()> {
-        let function = compile(source)?;
+        let function = compile(source, &mut self.heap)?;
         self.push(Value::Obj(function.cast()));
         self.pop();
-        let mut closure = ObjClosure::new(function).into_ptr();
+        let mut closure = self.heap.new_obj(ObjClosure::new(function)).cast();
         self.push(Value::Obj(closure.cast()));
         self.call(closure, 0)?;
         self.run(false)?;
-        // Might need to generalize this when it comes time to implement GC
-        unsafe {
-            let function = (*closure.as_ptr()).function();
-            for constant in function.chunk.constants().iter() {
-                if let Value::Obj(o) = constant {
-                    self.objects.insert(o.as_ptr());
-                }
-            }
-        }
         Ok(())
     }
 
@@ -161,15 +148,6 @@ impl Vm {
         //println!("pushing {value}, sp: {}", self.sp);
         self.stack[self.sp].set(value);
         self.sp += 1;
-        // Every time we push a value, we add it to the linked list
-        if let Value::Obj(o) = value {
-            self.objects.insert(o.as_ptr());
-            // unsafe {
-            //     println!("push curr: {:?}, new: {:?}", self.objects, o);
-            //     (*o.as_ptr()).next = self.objects.take();
-            //     self.objects = Some(o);
-            // }
-        }
     }
 
     #[inline]
@@ -184,19 +162,59 @@ impl Vm {
         self.stack[self.sp - 1 - dist].get()
     }
 
-    pub fn free_objects(&mut self) {
-        for obj in (&mut self.objects).iter() {
-            unsafe {
-                match (*(*obj)).kind {
-                    ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
-                    ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
-                    ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
-                    ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
-                    ObjType::Upvalue => drop(Box::from_raw(obj.cast::<ObjUpvalue>())),
-                };
+    pub fn collect_garbage(&mut self) {
+        self.mark_roots();
+    }
+
+    fn mark_roots(&mut self) {
+        unsafe {
+            for val in &self.stack[..self.sp] {
+                self.mark_value(val.get());
+            }
+
+            for (name, value) in self.globals.iter() {
+                self.mark_value(*name);
+                self.mark_value(*value);
+            }
+
+            for frame in &self.frames[..self.frame_count] {
+                self.mark_obj(frame.closure.cast_mut().cast())
+            }
+
+            let mut upvalue = self.open_upvalues.clone();
+            while let Some(uv) = upvalue {
+                self.mark_obj(uv.as_ptr().cast());
+                upvalue = Some(uv);
+            }
+
+            let mut objects = self.heap.objects;
+            while let Some(obj) = objects {
+                if (*obj.as_ptr()).is_marked {
+                    println!("{} is marked", Value::Obj(obj));
+                } else {
+                    println!("{} is not marked", Value::Obj(obj));
+                }
+                objects = (*obj.as_ptr()).next;
             }
         }
-        self.objects.clear();
+    }
+
+    fn mark_value(&self, value: Value) {
+        if let Value::Obj(o) = value {
+            unsafe {
+                self.mark_obj(o.as_ptr());
+            }
+        }
+    }
+
+    fn mark_obj(&self, obj: *mut Obj) {
+        unsafe {
+            (*obj).is_marked = true;
+        }
+    }
+
+    pub fn free_objects(&mut self) {
+        self.heap.free_objects();
     }
 
     unsafe fn free_object(&mut self, obj: *mut Obj) {
@@ -207,7 +225,6 @@ impl Vm {
             ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
             ObjType::Upvalue => drop(Box::from_raw(obj.cast::<ObjUpvalue>())),
         };
-        self.objects.remove(&obj);
     }
 
     #[inline]
@@ -307,7 +324,7 @@ impl Vm {
         unsafe {
             let mut prev = None;
             let mut upvalue = self.open_upvalues;
-            while let Some(uv) = upvalue 
+            while let Some(uv) = upvalue
             && (*uv.as_ptr()).location > local {
                 prev = upvalue;
                 upvalue = (*uv.as_ptr()).next;
@@ -320,8 +337,7 @@ impl Vm {
 
             let mut created = ObjUpvalue::new(local);
             created.next = upvalue;
-            let created = created.into_ptr();
-            self.objects.insert(created.cast().as_ptr());
+            let created = self.heap.new_obj(created).cast();
 
             match prev {
                 Some(uv) => (*uv.as_ptr()).next = Some(created),
@@ -491,7 +507,10 @@ impl Vm {
                     }
                     OpCode::Closure => match read_constant!() {
                         Value::Obj(o) => {
-                            let closure = ObjClosure::new(o.cast()).into_ptr();
+                            let closure = self
+                                .heap
+                                .new_obj(ObjClosure::new(o.cast()))
+                                .cast::<ObjClosure>();
                             self.push(Value::Obj(closure.cast()));
                             let upvalues = &mut (*closure.as_ptr()).upvalues;
                             for _ in 0..upvalues.capacity() {
@@ -504,14 +523,6 @@ impl Vm {
                                     upvalues.push(NonNull::new(upvalue).unwrap());
                                 } else {
                                     upvalues.push((*frame.closure).upvalues[index]);
-                                }
-                            }
-                            unsafe {
-                                let function = (*closure.as_ptr()).function();
-                                for constant in function.chunk.constants().iter() {
-                                    if let Value::Obj(o) = constant {
-                                        self.objects.insert(o.as_ptr());
-                                    }
                                 }
                             }
                         }
@@ -579,6 +590,7 @@ mod tests {
         closure();
         "#;
         vm.interpret(source)?;
+        vm.collect_garbage();
         vm.free_objects();
         Ok(())
     }
