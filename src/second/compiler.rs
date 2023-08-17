@@ -6,7 +6,7 @@ use enum_map::{Enum, EnumMap};
 use super::{
     chunk::{Chunk, OpCode},
     memory::Heap,
-    object::{FunctionType, Obj, ObjFunction, ObjString},
+    object::{FunctionType, Obj, ObjClass, ObjFunction, ObjString},
     scanner::{
         scan, Parsed, Token,
         TokenType::{self, *},
@@ -64,7 +64,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const LEFT_BRACE: Self      = Self(None,                    None,                   Precedence::None);
     const RIGHT_BRACE: Self     = Self(None,                    None,                   Precedence::None);
     const COMMA: Self           = Self(None,                    None,                   Precedence::None);
-    const DOT: Self             = Self(None,                    None,                   Precedence::None);
+    const DOT: Self             = Self(None,                    Some(Parser::dot),      Precedence::Call);
     const MINUS: Self           = Self(Some(Parser::unary),     Some(Parser::binary),   Precedence::Term);
     const PLUS: Self            = Self(None,                    Some(Parser::binary),   Precedence::Term);
     const SEMICOLON: Self       = Self(None,                    None,                   Precedence::None);
@@ -401,14 +401,58 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
     }
 
+    fn add_constant(&mut self, value: Value) -> u8 {
+        unsafe {
+            (*self.current_compiler.as_ptr())
+                .function
+                .chunk
+                .add_constant(value)
+        }
+    }
+
     fn declaration(&mut self) -> Result<()> {
-        if self.match_token(Fun)? {
+        if self.match_token(Class)? {
+            self.class_dec()
+        } else if self.match_token(Fun)? {
             self.fun_dec()
         } else if self.match_token(Var)? {
             self.var_dec()
         } else {
             self.statement()
         }
+    }
+
+    fn class_dec(&mut self) -> Result<()> {
+        self.consume_token(Identifier);
+        let Token::Identifier(name) = self.prev.unwrap().1 else {
+            unreachable!()
+        };
+        let obj = self.heap.new_obj(ObjString::new(name.to_string()));
+        let name = self.add_constant(Value::Obj(obj));
+        self.declare_variable()?;
+        self.emit_byte(OpCode::Class);
+        self.emit_byte(name);
+        self.define_variable(name)?;
+        self.consume_token(LeftBrace);
+        self.consume_token(RightBrace);
+        Ok(())
+    }
+
+    fn dot(&mut self, can_assign: bool) -> Result<()> {
+        self.consume_token(Identifier)?;
+        let Token::Identifier(n) = self.prev.unwrap().1 else {
+            unreachable!()
+        };
+        let obj = self.heap.new_obj(ObjString::new(n.to_string()));
+        let name = self.add_constant(Value::Obj(obj));
+        if can_assign && self.match_token(Equal)? {
+            self.expression()?;
+            self.emit_byte(OpCode::SetProperty);
+        } else {
+            self.emit_byte(OpCode::GetProperty);
+        }
+        self.emit_byte(name);
+        Ok(())
     }
 
     fn emit_return(&mut self) {
@@ -715,9 +759,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.block()?;
                 self.end_scope();
             }
-            Token::Class => {
-                self.advance()?;
-            } //todo!(),
             Token::For => {
                 self.begin_scope();
                 self.advance()?;

@@ -8,7 +8,10 @@ use std::{
 };
 
 use super::{
-    object::{IsObj, Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
+    object::{
+        IsObj, Obj, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString, ObjType,
+        ObjUpvalue,
+    },
     value::Value,
     Vm,
 };
@@ -144,6 +147,14 @@ impl Heap {
                     }
                 }
                 ObjType::Upvalue => self.mark_value((*obj.cast::<ObjUpvalue>()).closed.get()),
+                ObjType::Instance => {
+                    let instance = obj.cast::<ObjInstance>();
+                    self.mark_obj((*instance).class.cast());
+                    for (key, val) in (*instance).fields.iter() {
+                        self.mark_value(*key);
+                        self.mark_value(*val);
+                    }
+                }
                 _ => {}
             }
         }
@@ -151,10 +162,12 @@ impl Heap {
 
     unsafe fn free_object(&mut self, obj: *mut Obj) {
         match (*obj).kind {
-            ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
-            ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
-            ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
+            ObjType::Class => drop(Box::from_raw(obj.cast::<ObjClass>())),
             ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
+            ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),
+            ObjType::Instance => drop(Box::from_raw(obj.cast::<ObjInstance>())),
+            ObjType::Native => drop(Box::from_raw(obj.cast::<ObjNative>())),
+            ObjType::String => drop(Box::from_raw(obj.cast::<ObjString>())),
             ObjType::Upvalue => drop(Box::from_raw(obj.cast::<ObjUpvalue>())),
         }
     }

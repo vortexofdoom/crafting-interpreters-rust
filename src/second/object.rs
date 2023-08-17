@@ -1,6 +1,7 @@
 use std::{cell::Cell, ptr::NonNull};
 
 use datasize::DataSize;
+use fnv::FnvHashMap;
 
 use super::{chunk::Chunk, value::Value};
 
@@ -19,7 +20,7 @@ pub trait IsObj: DataSize + Sized {
 }
 
 macro_rules! impl_IsObj {
-    ($name:tt, $struct:tt) => {
+    ($name:tt, $struct:tt, $fun:tt) => {
         impl IsObj for $struct {
             fn kind(&self) -> ObjType {
                 ObjType::$name
@@ -29,21 +30,35 @@ macro_rules! impl_IsObj {
                 &mut self.obj
             }
         }
+
+        impl Obj {
+            fn $fun() -> Self {
+                Self {
+                    kind: ObjType::$name,
+                    is_marked: false,
+                    next: None,
+                }
+            }
+        }
     };
 }
 
-impl_IsObj!(Closure, ObjClosure);
-impl_IsObj!(Function, ObjFunction);
-impl_IsObj!(String, ObjString);
-impl_IsObj!(Native, ObjNative);
-impl_IsObj!(Upvalue, ObjUpvalue);
+impl_IsObj!(Closure, ObjClosure, closure);
+impl_IsObj!(Function, ObjFunction, function);
+impl_IsObj!(String, ObjString, string);
+impl_IsObj!(Native, ObjNative, native);
+impl_IsObj!(Upvalue, ObjUpvalue, upvalue);
+impl_IsObj!(Class, ObjClass, class);
+impl_IsObj!(Instance, ObjInstance, instance);
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum ObjType {
-    String,
-    Function,
-    Native,
+    Class,
     Closure,
+    Function,
+    Instance,
+    Native,
+    String,
     Upvalue,
 }
 
@@ -66,51 +81,6 @@ impl DataSize for Obj {
 }
 
 impl Obj {
-    #[inline]
-    fn string() -> Self {
-        Self {
-            kind: ObjType::String,
-            is_marked: false,
-            next: None,
-        }
-    }
-
-    #[inline]
-    fn function() -> Self {
-        Self {
-            kind: ObjType::Function,
-            is_marked: false,
-            next: None,
-        }
-    }
-
-    #[inline]
-    fn closure() -> Self {
-        Self {
-            kind: ObjType::Closure,
-            is_marked: false,
-            next: None,
-        }
-    }
-
-    #[inline]
-    fn native() -> Self {
-        Self {
-            kind: ObjType::Native,
-            is_marked: false,
-            next: None,
-        }
-    }
-
-    #[inline]
-    fn upvalue() -> Self {
-        Self {
-            kind: ObjType::Upvalue,
-            is_marked: false,
-            next: None,
-        }
-    }
-
     #[inline]
     pub fn set_next(&mut self, next: Option<NonNull<Self>>) {
         self.next = next;
@@ -327,5 +297,59 @@ impl ObjUpvalue {
 
     pub fn value(&self) -> Value {
         unsafe { (*self.location).get() }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ObjClass {
+    obj: Obj,
+    pub name: NonNull<ObjString>,
+}
+
+impl DataSize for ObjClass {
+    const IS_DYNAMIC: bool = true;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        unsafe { (*self.name.as_ptr()).estimate_heap_size() }
+    }
+}
+
+impl ObjClass {
+    pub fn new(name: NonNull<ObjString>) -> Self {
+        Self {
+            obj: Obj::class(),
+            name: name,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ObjInstance {
+    pub obj: Obj,
+    pub class: NonNull<ObjClass>,
+    pub fields: FnvHashMap<Value, Value>,
+}
+
+impl ObjInstance {
+    pub fn new(class: NonNull<ObjClass>) -> Self {
+        Self {
+            obj: Obj::instance(),
+            class,
+            fields: FnvHashMap::default(),
+        }
+    }
+}
+
+impl DataSize for ObjInstance {
+    const IS_DYNAMIC: bool = true;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        self.fields.estimate_heap_size()
     }
 }

@@ -28,7 +28,10 @@ use crate::second::memory::{ALLOCATED, NEXT_GC};
 use self::{
     debug::disassemble_instruction,
     memory::Heap,
-    object::{Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
+    object::{
+        Obj, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString, ObjType,
+        ObjUpvalue,
+    },
     value::Value,
 };
 
@@ -189,14 +192,14 @@ impl Vm {
     pub fn run_file(&mut self, path: PathBuf) -> Result<()> {
         let mut files = vec![];
         let path = Path::new(&path);
-        if path.is_dir() {
+        if path.extension().is_some_and(|s| s == OsStr::new("lox")) {
+            files.push(path.to_path_buf());
+        } else if path.is_dir() {
             println!("===== Running Files in {} =====", path.display());
             for entry in path.read_dir().unwrap() {
                 self.run_file(entry.as_ref().unwrap().path())?;
                 files.push(entry.as_ref().unwrap().path());
             }
-        } else if path.extension().is_some_and(|s| s == OsStr::new("lox")) {
-            files.push(path.to_path_buf());
         }
         for f in files {
             println!("~~ Running {} ~~", f.display());
@@ -277,6 +280,12 @@ impl Vm {
                         let result = native.function()(args);
                         self.sp -= arg_count as usize + 1;
                         self.push(result);
+                        return Ok(());
+                    }
+                    ObjType::Class => {
+                        let class = o.cast::<ObjClass>();
+                        self.stack[self.sp - arg_count as usize - 1]
+                            .set(Value::Obj(self.heap.new_obj(ObjInstance::new(class))));
                         return Ok(());
                     }
                     _ => {}
@@ -439,6 +448,39 @@ impl Vm {
                         let upvalue = (*frame.closure).upvalues[slot].as_ptr();
                         (*upvalue).set_value(self.peek(0));
                     }
+                    OpCode::GetProperty => {
+                        let instance = self.peek(0);
+                        let name = read_constant!();
+                        if let Value::Obj(instance) = instance {
+                            let instance = instance.as_ptr();
+                            if (*instance).kind == ObjType::Instance {
+                                if let Some(val) =
+                                    (*instance.cast::<ObjInstance>()).fields.get(&name)
+                                {
+                                    self.pop();
+                                    self.push(*val);
+                                    continue;
+                                }
+                            }
+                        }
+                        return Err(anyhow!(InterpretError::Runtime));
+                    }
+                    OpCode::SetProperty => {
+                        let instance = self.peek(1);
+                        if let Value::Obj(obj) = instance {
+                            let obj = obj.as_ptr();
+                            if (*obj).kind == ObjType::Instance {
+                                let instance = obj.cast::<ObjInstance>();
+                                let name = read_constant!();
+                                (*instance).fields.insert(name, self.peek(0));
+                                let value = self.pop();
+                                self.pop();
+                                self.push(value);
+                                continue;
+                            }
+                        }
+                        return Err(anyhow!(InterpretError::Runtime));
+                    }
                     OpCode::Equal => compare!(==),
                     OpCode::Greater => compare!(>),
                     OpCode::GreaterEqual => compare!(>=),
@@ -552,6 +594,12 @@ impl Vm {
                         self.sp = frame.starting_slot;
                         self.push(result);
                         frame = self.frames[self.frame_count - 1];
+                    }
+                    OpCode::Class => {
+                        let name = read_constant!();
+                        let Value::Obj(o) = name else { unreachable!() };
+                        let obj = self.heap.new_obj(ObjClass::new(o.cast()));
+                        self.push(Value::Obj(obj));
                     }
                 }
             }

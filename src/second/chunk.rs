@@ -18,6 +18,8 @@ pub enum OpCode {
     SetGlobal,
     GetUpvalue,
     SetUpvalue,
+    GetProperty,
+    SetProperty,
     Equal,
     Greater,
     GreaterEqual,
@@ -37,6 +39,7 @@ pub enum OpCode {
     Closure,
     CloseUpvalue,
     Return,
+    Class,
 }
 
 #[derive(Debug, Default, Clone, DataSize)]

@@ -13,7 +13,10 @@ use datasize::DataSize;
 use super::{
     chunk::Chunk,
     memory::Heap,
-    object::{Obj, ObjClosure, ObjFunction, ObjNative, ObjString, ObjType, ObjUpvalue},
+    object::{
+        Obj, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString, ObjType,
+        ObjUpvalue,
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -34,11 +37,15 @@ impl DataSize for Value {
             Value::Obj(o) => unsafe {
                 let o = o.as_ptr();
                 match (*o).kind {
-                    ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
-                    ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
-                    ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
+                    ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
                     ObjType::Closure => (*o.cast::<ObjClosure>()).estimate_heap_size(),
+                    ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
+                    ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
+                    ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
+                    ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
                     ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).estimate_heap_size(),
+                    ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
+                    ObjType::Instance => (*o.cast::<ObjInstance>()).estimate_heap_size(),
                 }
             },
             _ => 0,
@@ -102,6 +109,14 @@ impl std::fmt::Display for Value {
                         f,
                         "{}",
                         (*o.cast::<ObjClosure>().as_ptr()).function.as_ref()
+                    ),
+                    ObjType::Class => {
+                        write!(f, "{}", (*o.cast::<ObjClass>().as_ptr()).name.as_ref())
+                    }
+                    ObjType::Instance => write!(
+                        f,
+                        "{} instance",
+                        Value::Obj((*o.cast::<ObjInstance>().as_ptr()).class.cast())
                     ),
                 }
             },
@@ -202,9 +217,8 @@ impl std::cmp::PartialEq for Value {
                         ObjType::Function => {
                             l.cast::<ObjFunction>().as_ref() == r.cast::<ObjFunction>().as_ref()
                         }
-                        ObjType::Closure => todo!(),
-                        ObjType::Native => todo!(),
-                        ObjType::Upvalue => todo!(),
+                        // Could make this more robust
+                        _ => false,
                     }
             },
             (Self::Nil, Self::Nil) => true,

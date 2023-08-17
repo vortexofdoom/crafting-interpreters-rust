@@ -24,7 +24,12 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         | OpCode::GetLocal
         | OpCode::SetLocal
         | OpCode::GetGlobal
-        | OpCode::SetGlobal => constant_inst(chunk, offset),
+        | OpCode::SetGlobal
+        | OpCode::SetUpvalue
+        | OpCode::GetUpvalue
+        | OpCode::Class
+        | OpCode::GetProperty
+        | OpCode::SetProperty => constant_inst(chunk, offset),
         OpCode::Jump | OpCode::JumpIfFalse => jump_inst(chunk, 1, offset),
         OpCode::Loop => jump_inst(chunk, -1, offset),
         OpCode::Closure => {
