@@ -380,6 +380,31 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn invoke(&mut self, name: Value, arg_count: u8) -> Result<()> {
+        let receiver = self.peek(arg_count as usize);
+        unsafe {
+            if let Value::Obj(o) = receiver
+            && (*o.as_ptr()).kind == ObjType::Instance {
+                let instance = o.as_ptr().cast::<ObjInstance>();
+                if let Some(val) = (*instance).fields.get(&name) {
+                    self.stack[self.sp - arg_count as usize - 1].set(*val);
+                    self.call_value(*val, arg_count)
+                } else {
+                    self.invoke_from_class((*o.as_ptr().cast::<ObjInstance>()).class, name, arg_count)
+                }
+            } else {
+                Err(anyhow!("Only instances have methods."))
+            }
+        }
+    }
+
+    fn invoke_from_class(&mut self, class: NonNull<ObjClass>, name: Value, arg_count: u8) -> Result<()> {
+        unsafe {
+            let Value::Obj(method) = (*class.as_ptr()).methods.get(&name).ok_or(anyhow!("Undefined property {name}."))? else {unreachable!()};
+            self.call(method.cast(), arg_count)
+        }
+    }
+
     pub fn run(&mut self, debug_trace: bool) -> Result<()> {
         unsafe {
             let mut frame = self.frames[self.frame_count - 1];
@@ -579,6 +604,13 @@ impl<'a> Vm<'a> {
                         self.call_value(self.peek(arg_count as usize), arg_count)?;
                         frame = self.frames[self.frame_count - 1];
                     }
+                    OpCode::Invoke => {
+                        let method = read_constant!();
+                        let arg_count = read_byte!();
+                        self.frames[self.frame_count - 1] = frame;
+                        self.invoke(method, arg_count)?;
+                        frame = self.frames[self.frame_count - 1];
+                    }
                     OpCode::Closure => {
                         self.collect_garbage();
                         match read_constant!() {
@@ -687,9 +719,10 @@ mod tests {
               this.coffee = nil;
             }
           }
-          
+          for (var i = 0; i < 10; i = i + 1) {
           var maker = CoffeeMaker("coffee and chicory");
           maker.brew();
+          }
         "#;
         let _ = vm.interpret(source);
         vm.collect_garbage();

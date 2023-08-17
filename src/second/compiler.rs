@@ -493,10 +493,16 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         if can_assign && self.match_token(Equal)? {
             self.expression()?;
             self.emit_byte(OpCode::SetProperty);
+            self.emit_byte(name);
+        } else if self.match_token(LeftParen)? {
+            let arg_count = self.argument_list()?;
+            self.emit_byte(OpCode::Invoke);
+            self.emit_byte(name);
+            self.emit_byte(arg_count);
         } else {
             self.emit_byte(OpCode::GetProperty);
+            self.emit_byte(name);
         }
-        self.emit_byte(name);
         Ok(())
     }
 
