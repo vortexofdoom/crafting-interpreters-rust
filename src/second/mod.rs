@@ -419,7 +419,21 @@ impl Vm {
                     OpCode::GreaterEqual => compare!(>=),
                     OpCode::Less => compare!(<),
                     OpCode::LessEqual => compare!(<=),
-                    OpCode::Add => bin_op!(+),
+                    OpCode::Add => {
+                        let r = self.pop();
+                        let l = self.pop();
+                        let result = match (l, r) {
+                            (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
+                            (Value::Obj(o), _) | (_, Value::Obj(o))
+                                if (*o.as_ptr()).kind == ObjType::String =>
+                            {
+                                let obj = self.heap.new_obj(ObjString::new(format!("{l}{r}")));
+                                Value::Obj(obj)
+                            }
+                            _ => return Err(anyhow!("cannot add {l} and {r}")),
+                        };
+                        self.push(result);
+                    },
                     OpCode::Subtract => bin_op!(-),
                     OpCode::Multiply => bin_op!(*),
                     OpCode::Divide => bin_op!(/),
