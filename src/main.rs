@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let args = LoxArgs::parse();
     let mut vm = Vm::new();
     if let Some(p) = args.path {
-        vm.run_file(&p)?;
+        vm.run_file(p.into())?;
     } else {
         vm.run_prompt()?;
     }

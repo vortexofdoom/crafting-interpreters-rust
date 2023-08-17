@@ -285,11 +285,6 @@ impl ObjClosure {
             }
         }
     }
-
-    #[inline]
-    pub fn function(&self) -> &ObjFunction {
-        unsafe { self.function.as_ref() }
-    }
 }
 
 #[repr(C)]

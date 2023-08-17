@@ -715,7 +715,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 self.block()?;
                 self.end_scope();
             }
-            Token::Class => todo!(),
+            Token::Class => {
+                self.advance()?;
+            } //todo!(),
             Token::For => {
                 self.begin_scope();
                 self.advance()?;

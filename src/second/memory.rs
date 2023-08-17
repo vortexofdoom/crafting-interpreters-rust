@@ -13,8 +13,9 @@ use super::{
     Vm,
 };
 
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-static NEXT_GC: AtomicUsize = AtomicUsize::new(1024 * 1024);
+pub static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+pub static NEXT_GC: AtomicUsize = AtomicUsize::new(1024 * 1024);
+const GC_GROW_FACTOR: usize = 2;
 #[global_allocator]
 static ALLOC: LoxAlloc = LoxAlloc;
 
@@ -57,10 +58,7 @@ impl Heap {
             (*new.as_ptr()).next = self.objects;
             self.objects = Some(new);
         }
-        println!(
-            "allocated {size}, Total: {}",
-            ALLOCATED.load(Ordering::Relaxed)
-        );
+        //println!("allocated {size}, Total: {}", ALLOCATED.load(Ordering::Relaxed));
         new
     }
 
@@ -183,9 +181,8 @@ impl Heap {
                 }
             }
         }
-        println!(
-            "finished GC. Prev bytes: {prev_bytes}, current bytes: {}",
-            ALLOCATED.load(Ordering::Relaxed)
-        );
+        let new = ALLOCATED.load(Ordering::Relaxed);
+        NEXT_GC.store(new * GC_GROW_FACTOR, Ordering::Relaxed);
+        //println!("finished GC. Prev bytes: {prev_bytes}, current bytes: {new}");
     }
 }

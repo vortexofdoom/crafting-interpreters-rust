@@ -8,17 +8,22 @@ pub mod value;
 
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::{hash_map::RandomState, HashMap, HashSet},
+    ffi::OsStr,
     fs::File,
+    hash::BuildHasherDefault,
     io::{Read, Write},
     mem::MaybeUninit,
-    path::Path,
+    path::{Path, PathBuf},
     ptr::NonNull,
 };
 
 use anyhow::{anyhow, Result};
 use chunk::{Chunk, OpCode};
 use compiler::compile;
+use fnv::FnvHashMap;
+
+use crate::second::memory::{ALLOCATED, NEXT_GC};
 
 use self::{
     debug::disassemble_instruction,
@@ -61,7 +66,7 @@ impl CallFrame {
     fn read_constant(&mut self) -> Value {
         unsafe {
             let i = self.read_byte() as usize;
-            (*self.closure).function().chunk.constants()[i]
+            (*(*self.closure).function.as_ptr()).chunk.constants()[i]
         }
     }
 
@@ -99,7 +104,7 @@ pub struct Vm {
     // Probably worth revisiting for performance, but maybe it's not even that bad, as iteration only has
     // a little more overhead, and the same amount of pointer indirection?
     heap: Heap,
-    globals: HashMap<Value, Value>,
+    globals: FnvHashMap<Value, Value>,
     open_upvalues: Option<NonNull<ObjUpvalue>>,
 }
 
@@ -113,7 +118,7 @@ impl Vm {
             stack: [Self::DEFAULT_VAL; STACK_MAX],
             sp: 0,
             heap: Heap::new(),
-            globals: HashMap::new(),
+            globals: FnvHashMap::default(),
             open_upvalues: None,
         };
 
@@ -164,7 +169,7 @@ impl Vm {
     }
 
     pub fn collect_garbage(&mut self) {
-        println!("starting garbage collection");
+        //println!("starting garbage collection");
         let vm = self as *const Vm;
         self.heap.mark_vm_roots(vm);
         self.heap.trace_references();
@@ -181,12 +186,26 @@ impl Vm {
         self.sp = 0;
     }
 
-    pub fn run_file(&mut self, path: &str) -> Result<()> {
-        let mut file = File::open(Path::new(path)).expect("valid files only");
-        let mut source = String::new();
-        file.read_to_string(&mut source)?;
-        if let Err(e) = self.interpret(&source) {
-            println!("{e}");
+    pub fn run_file(&mut self, path: PathBuf) -> Result<()> {
+        let mut files = vec![];
+        let path = Path::new(&path);
+        if path.is_dir() {
+            println!("===== Running Files in {} =====", path.display());
+            for entry in path.read_dir().unwrap() {
+                self.run_file(entry.as_ref().unwrap().path())?;
+                files.push(entry.as_ref().unwrap().path());
+            }
+        } else if path.extension().is_some_and(|s| s == OsStr::new("lox")) {
+            files.push(path.to_path_buf());
+        }
+        for f in files {
+            println!("~~ Running {} ~~", f.display());
+            let mut file = File::open(Path::new(&f)).expect("valid files only");
+            let mut source = String::new();
+            file.read_to_string(&mut source)?;
+            if let Err(e) = self.interpret(&source) {
+                println!("{e}");
+            }
         }
         Ok(())
     }
@@ -326,7 +345,7 @@ impl Vm {
             macro_rules! read_constant {
                 () => {{
                     let i = read_byte!() as usize;
-                    (*frame.closure).function().chunk.constants()[i]
+                    (*(*frame.closure).function.as_ptr()).chunk.constants()[i]
                 }};
             }
 
@@ -355,7 +374,7 @@ impl Vm {
             }
 
             loop {
-                let chunk = &(*frame.closure).function().chunk;
+                let chunk = &(*(*frame.closure).function.as_ptr()).chunk;
                 let code = chunk.code();
                 let offset = frame.ip.offset_from(code.as_ptr()) as usize;
                 if offset >= code.len() {
@@ -364,6 +383,12 @@ impl Vm {
 
                 if debug_trace {
                     disassemble_instruction(chunk, offset);
+                }
+
+                if ALLOCATED.load(std::sync::atomic::Ordering::Relaxed)
+                    >= NEXT_GC.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    self.collect_garbage();
                 }
 
                 match frame.op_from_byte()? {
@@ -433,7 +458,7 @@ impl Vm {
                             _ => return Err(anyhow!("cannot add {l} and {r}")),
                         };
                         self.push(result);
-                    },
+                    }
                     OpCode::Subtract => bin_op!(-),
                     OpCode::Multiply => bin_op!(*),
                     OpCode::Divide => bin_op!(/),
