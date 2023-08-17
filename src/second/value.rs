@@ -14,8 +14,8 @@ use super::{
     chunk::Chunk,
     memory::Heap,
     object::{
-        Obj, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString, ObjType,
-        ObjUpvalue,
+        Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString,
+        ObjType, ObjUpvalue,
     },
 };
 
@@ -37,14 +37,13 @@ impl DataSize for Value {
             Value::Obj(o) => unsafe {
                 let o = o.as_ptr();
                 match (*o).kind {
+                    ObjType::BoundMethod => (*o.cast::<ObjBoundMethod>()).estimate_heap_size(),
                     ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
                     ObjType::Closure => (*o.cast::<ObjClosure>()).estimate_heap_size(),
-                    ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
                     ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
                     ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
                     ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
                     ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).estimate_heap_size(),
-                    ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
                     ObjType::Instance => (*o.cast::<ObjInstance>()).estimate_heap_size(),
                 }
             },
@@ -117,6 +116,11 @@ impl std::fmt::Display for Value {
                         f,
                         "{} instance",
                         Value::Obj((*o.cast::<ObjInstance>().as_ptr()).class.cast())
+                    ),
+                    ObjType::BoundMethod => write!(
+                        f,
+                        "{}",
+                        *(*o.cast::<ObjBoundMethod>().as_ptr()).method.as_ptr()
                     ),
                 }
             },

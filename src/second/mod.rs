@@ -16,6 +16,7 @@ use std::{
     mem::MaybeUninit,
     path::{Path, PathBuf},
     ptr::NonNull,
+    sync::atomic::Ordering::Relaxed,
 };
 
 use anyhow::{anyhow, Result};
@@ -29,8 +30,8 @@ use self::{
     debug::disassemble_instruction,
     memory::Heap,
     object::{
-        Obj, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString, ObjType,
-        ObjUpvalue,
+        IsObj, Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative,
+        ObjString, ObjType, ObjUpvalue,
     },
     value::Value,
 };
@@ -39,13 +40,13 @@ const STACK_MAX: usize = FRAMES_MAX * 256;
 const FRAMES_MAX: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
-struct CallFrame {
-    closure: *const ObjClosure,
+struct CallFrame<'a> {
+    closure: *const ObjClosure<'a>,
     ip: *const u8,
     starting_slot: usize,
 }
 
-impl Default for CallFrame {
+impl Default for CallFrame<'_> {
     fn default() -> Self {
         Self {
             closure: std::ptr::null(),
@@ -55,7 +56,7 @@ impl Default for CallFrame {
     }
 }
 
-impl CallFrame {
+impl CallFrame<'_> {
     #[inline]
     fn read_byte(&mut self) -> u8 {
         unsafe {
@@ -94,9 +95,9 @@ impl std::fmt::Display for InterpretError {
     }
 }
 
-pub struct Vm {
+pub struct Vm<'a> {
     //chunk: Option<Chunk>,
-    frames: [CallFrame; FRAMES_MAX],
+    frames: [CallFrame<'a>; FRAMES_MAX],
     frame_count: usize,
     stack: [Cell<Value>; STACK_MAX],
     sp: usize,
@@ -109,9 +110,10 @@ pub struct Vm {
     heap: Heap,
     globals: FnvHashMap<Value, Value>,
     open_upvalues: Option<NonNull<ObjUpvalue>>,
+    init_string: Value,
 }
 
-impl Vm {
+impl<'a> Vm<'a> {
     const DEFAULT_VAL: Cell<Value> = Cell::new(Value::Nil);
     pub fn new() -> Self {
         let frames = [CallFrame::default(); FRAMES_MAX];
@@ -123,10 +125,21 @@ impl Vm {
             heap: Heap::new(),
             globals: FnvHashMap::default(),
             open_upvalues: None,
+            init_string: Value::Nil,
         };
+
+        let obj = vm.heap.new_obj(ObjString::new(String::from("init")));
+        vm.init_string = Value::Obj(obj);
 
         vm.define_native("clock", 0, Value::clock);
         vm
+    }
+
+    fn new_obj<T: IsObj>(&mut self, obj: T) -> NonNull<Obj> {
+        if ALLOCATED.load(Relaxed) >= NEXT_GC.load(Relaxed) {
+            self.collect_garbage();
+        }
+        self.heap.new_obj(obj)
     }
 
     fn define_native(
@@ -135,8 +148,8 @@ impl Vm {
         arity: usize,
         function: fn(Option<&[Cell<Value>]>) -> Value,
     ) {
-        let name = self.heap.new_obj(ObjString::new(String::from(name)));
-        let native = self.heap.new_obj(ObjNative::new(arity, function));
+        let name = self.new_obj(ObjString::new(String::from(name)));
+        let native = self.new_obj(ObjNative::new(arity, function));
         self.globals.insert(Value::Obj(name), Value::Obj(native));
     }
 
@@ -144,7 +157,7 @@ impl Vm {
         let function = compile(source, &mut self.heap)?;
         self.push(Value::Obj(function.cast()));
         self.pop();
-        let mut closure = self.heap.new_obj(ObjClosure::new(function)).cast();
+        let mut closure = self.new_obj(ObjClosure::new(function)).cast();
         self.push(Value::Obj(closure.cast()));
         self.call(closure, 0)?;
         self.run(false)?;
@@ -162,7 +175,7 @@ impl Vm {
     #[inline]
     fn pop(&mut self) -> Value {
         self.sp -= 1;
-        //println!("popping {}, sp: {}", self.stack[self.sp], self.sp);
+        //println!("popping {}, sp: {}", self.stack[self.sp].get(), self.sp);
         self.stack[self.sp].get()
     }
 
@@ -232,7 +245,7 @@ impl Vm {
         Ok(())
     }
 
-    pub fn call(&mut self, closure: NonNull<ObjClosure>, arg_count: u8) -> Result<()> {
+    pub fn call(&mut self, closure: NonNull<ObjClosure<'a>>, arg_count: u8) -> Result<()> {
         unsafe {
             let function = (*closure.as_ptr()).function.as_ptr();
             if (*function).arity != arg_count {
@@ -284,9 +297,21 @@ impl Vm {
                     }
                     ObjType::Class => {
                         let class = o.cast::<ObjClass>();
-                        self.stack[self.sp - arg_count as usize - 1]
-                            .set(Value::Obj(self.heap.new_obj(ObjInstance::new(class))));
+                        let obj = self.new_obj(ObjInstance::new(class));
+                        self.stack[self.sp - arg_count as usize - 1].set(Value::Obj(obj));
+                        if let Some(Value::Obj(init)) =
+                            (*class.as_ptr()).methods.get(&self.init_string)
+                        {
+                            return self.call(init.cast(), arg_count);
+                        } else if arg_count != 0 {
+                            return Err(anyhow!("expected 0 arguments but got {arg_count}"));
+                        }
                         return Ok(());
+                    }
+                    ObjType::BoundMethod => {
+                        let bound = o.cast::<ObjBoundMethod>().as_ptr();
+                        self.stack[self.sp - arg_count as usize - 1].set((*bound).receiver);
+                        return self.call((*bound).method, arg_count);
                     }
                     _ => {}
                 }
@@ -314,7 +339,7 @@ impl Vm {
             self.collect_garbage();
             let mut created = ObjUpvalue::new(local);
             created.next = upvalue;
-            let created = self.heap.new_obj(created).cast();
+            let created = self.new_obj(created).cast();
 
             match prev {
                 Some(uv) => (*uv.as_ptr()).next = Some(created),
@@ -334,6 +359,24 @@ impl Vm {
                 (*uv.as_ptr()).location = &(*uv.as_ptr()).closed;
                 self.open_upvalues = (*uv.as_ptr()).next;
             }
+        }
+    }
+
+    fn bind_method(&mut self, class: NonNull<ObjClass>, name: Value) -> Result<()> {
+        unsafe {
+            let Value::Obj(method) = (*class.as_ptr())
+                .methods
+                .get(&name)
+                .ok_or(anyhow!(InterpretError::Runtime))?
+            else {
+                unreachable!()
+            };
+            let bound = self
+                .heap
+                .new_obj(ObjBoundMethod::new(self.peek(0), method.cast()));
+            self.pop();
+            self.push(Value::Obj(bound));
+            Ok(())
         }
     }
 
@@ -449,20 +492,21 @@ impl Vm {
                         (*upvalue).set_value(self.peek(0));
                     }
                     OpCode::GetProperty => {
-                        let instance = self.peek(0);
-                        let name = read_constant!();
-                        if let Value::Obj(instance) = instance {
-                            let instance = instance.as_ptr();
-                            if (*instance).kind == ObjType::Instance {
-                                if let Some(val) =
-                                    (*instance.cast::<ObjInstance>()).fields.get(&name)
-                                {
-                                    self.pop();
-                                    self.push(*val);
-                                    continue;
-                                }
-                            }
+                        let Value::Obj(instance) = self.peek(0) else {
+                            return Err(anyhow!("Only instances have properties."));
+                        };
+                        let instance = instance.as_ptr();
+                        if (*instance).kind != ObjType::Instance {
+                            return Err(anyhow!("Only instances have properties."));
                         }
+                        let name = read_constant!();
+                        if let Some(val) = (*instance.cast::<ObjInstance>()).fields.get(&name) {
+                            self.pop();
+                            self.push(*val);
+                            continue;
+                        }
+                        self.bind_method((*instance.cast::<ObjInstance>()).class, name)?;
+                        continue;
                         return Err(anyhow!(InterpretError::Runtime));
                     }
                     OpCode::SetProperty => {
@@ -494,7 +538,7 @@ impl Vm {
                             (Value::Obj(o), _) | (_, Value::Obj(o))
                                 if (*o.as_ptr()).kind == ObjType::String =>
                             {
-                                let obj = self.heap.new_obj(ObjString::new(format!("{l}{r}")));
+                                let obj = self.new_obj(ObjString::new(format!("{l}{r}")));
                                 Value::Obj(obj)
                             }
                             _ => return Err(anyhow!("cannot add {l} and {r}")),
@@ -598,8 +642,19 @@ impl Vm {
                     OpCode::Class => {
                         let name = read_constant!();
                         let Value::Obj(o) = name else { unreachable!() };
-                        let obj = self.heap.new_obj(ObjClass::new(o.cast()));
+                        let obj = self.new_obj(ObjClass::new(o.cast()));
                         self.push(Value::Obj(obj));
+                    }
+                    OpCode::Method => {
+                        let name = read_constant!();
+                        let method = self.peek(0);
+                        let Value::Obj(class) = self.peek(1) else {
+                            unreachable!()
+                        };
+
+                        let class = class.cast::<ObjClass>().as_ptr();
+                        (*class).methods.insert(name, method);
+                        self.pop();
                     }
                 }
             }
@@ -620,23 +675,23 @@ mod tests {
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
         let source = r#"
-        {
-            fun outer() {
-                var x = "outside";
-                fun inner() {
-                    print x;
-                }
-                return inner;
+        class CoffeeMaker {
+            init(coffee) {
+              this.coffee = coffee;
             }
-            var closure = outer();
-            closure();
-        }
-
-        var hi = "hello";
-        hi = hi + 3;
-        print hi;
+          
+            brew() {
+              print "Enjoy your cup of " + this.coffee;
+          
+              // No reusing the grounds!
+              this.coffee = nil;
+            }
+          }
+          
+          var maker = CoffeeMaker("coffee and chicory");
+          maker.brew();
         "#;
-        vm.interpret(source)?;
+        let _ = vm.interpret(source);
         vm.collect_garbage();
         vm.free_objects();
         Ok(())

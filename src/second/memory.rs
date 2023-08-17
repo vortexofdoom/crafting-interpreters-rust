@@ -9,8 +9,8 @@ use std::{
 
 use super::{
     object::{
-        IsObj, Obj, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString, ObjType,
-        ObjUpvalue,
+        IsObj, Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative,
+        ObjString, ObjType, ObjUpvalue,
     },
     value::Value,
     Vm,
@@ -54,7 +54,7 @@ impl Heap {
         }
     }
 
-    pub fn new_obj<T: IsObj>(&mut self, mut obj: T) -> NonNull<Obj> {
+    pub fn new_obj<T: IsObj>(&mut self, obj: T) -> NonNull<Obj> {
         let size = obj.size();
         let mut new: NonNull<Obj> = NonNull::new(Box::into_raw(Box::new(obj)).cast()).unwrap();
         unsafe {
@@ -77,6 +77,8 @@ impl Heap {
 
     pub fn mark_vm_roots(&mut self, vm: *const Vm) {
         unsafe {
+            self.mark_value((*vm).init_string);
+
             for val in &(*vm).stack[..(*vm).sp] {
                 self.mark_value(val.get());
             }
@@ -155,6 +157,18 @@ impl Heap {
                         self.mark_value(*val);
                     }
                 }
+                ObjType::BoundMethod => {
+                    let bound = obj.cast::<ObjBoundMethod>();
+                    self.mark_value((*bound).receiver);
+                    self.mark_obj((*bound).method.cast());
+                }
+                ObjType::Class => {
+                    let class = obj.cast::<ObjClass>();
+                    for (k, v) in (*class).methods.iter() {
+                        self.mark_value(*k);
+                        self.mark_value(*v)
+                    }
+                }
                 _ => {}
             }
         }
@@ -162,6 +176,7 @@ impl Heap {
 
     unsafe fn free_object(&mut self, obj: *mut Obj) {
         match (*obj).kind {
+            ObjType::BoundMethod => drop(Box::from_raw(obj.cast::<ObjBoundMethod>())),
             ObjType::Class => drop(Box::from_raw(obj.cast::<ObjClass>())),
             ObjType::Closure => drop(Box::from_raw(obj.cast::<ObjClosure>())),
             ObjType::Function => drop(Box::from_raw(obj.cast::<ObjFunction>())),

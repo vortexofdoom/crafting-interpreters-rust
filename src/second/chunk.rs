@@ -40,6 +40,7 @@ pub enum OpCode {
     CloseUpvalue,
     Return,
     Class,
+    Method,
 }
 
 #[derive(Debug, Default, Clone, DataSize)]

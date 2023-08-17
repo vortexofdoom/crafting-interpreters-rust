@@ -20,7 +20,7 @@ pub trait IsObj: DataSize + Sized {
 }
 
 macro_rules! impl_IsObj {
-    ($name:tt, $struct:tt, $fun:tt) => {
+    ($name:tt, $struct:ty, $fun:tt) => {
         impl IsObj for $struct {
             fn kind(&self) -> ObjType {
                 ObjType::$name
@@ -43,16 +43,18 @@ macro_rules! impl_IsObj {
     };
 }
 
-impl_IsObj!(Closure, ObjClosure, closure);
-impl_IsObj!(Function, ObjFunction, function);
+impl_IsObj!(Closure, ObjClosure<'_>, closure);
+impl_IsObj!(Function, ObjFunction<'_>, function);
 impl_IsObj!(String, ObjString, string);
 impl_IsObj!(Native, ObjNative, native);
 impl_IsObj!(Upvalue, ObjUpvalue, upvalue);
 impl_IsObj!(Class, ObjClass, class);
 impl_IsObj!(Instance, ObjInstance, instance);
+impl_IsObj!(BoundMethod, ObjBoundMethod<'_>, bound_method);
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum ObjType {
+    BoundMethod,
     Class,
     Closure,
     Function,
@@ -141,19 +143,31 @@ impl std::fmt::Display for ObjString {
 pub enum FunctionType {
     Script,
     Function,
+    Method,
+    Initializer,
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, DataSize)]
-pub struct ObjFunction {
+#[derive(Debug, Clone)]
+pub struct ObjFunction<'a> {
     pub obj: Obj,
     pub arity: u8,
     pub upvalue_count: u8,
     pub chunk: Chunk,
-    pub name: Option<String>,
+    pub name: Option<&'a str>,
 }
 
-impl std::fmt::Display for ObjFunction {
+impl<'a> DataSize for ObjFunction<'a> {
+    const IS_DYNAMIC: bool = true;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        self.chunk.estimate_heap_size()
+    }
+}
+
+impl std::fmt::Display for ObjFunction<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.name {
             Some(name) => write!(f, "<fn {}>", name),
@@ -162,21 +176,21 @@ impl std::fmt::Display for ObjFunction {
     }
 }
 
-impl PartialEq for ObjFunction {
+impl PartialEq for ObjFunction<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.arity == other.arity && self.name == other.name
     }
 }
 
-impl ObjFunction {
+impl<'a> ObjFunction<'a> {
     #[inline]
-    pub fn new() -> Self {
+    pub fn new(name: Option<&'a str>) -> Self {
         Self {
             obj: Obj::function(),
             arity: 0,
             upvalue_count: 0,
             chunk: Chunk::new(),
-            name: None,
+            name,
         }
     }
 }
@@ -222,13 +236,13 @@ impl ObjNative {
 
 #[repr(C)]
 #[derive(Debug, Clone)]
-pub struct ObjClosure {
+pub struct ObjClosure<'a> {
     obj: Obj,
-    pub function: NonNull<ObjFunction>,
+    pub function: NonNull<ObjFunction<'a>>,
     pub upvalues: Vec<NonNull<ObjUpvalue>>,
 }
 
-impl DataSize for ObjClosure {
+impl DataSize for ObjClosure<'_> {
     const IS_DYNAMIC: bool = true;
 
     const STATIC_HEAP_SIZE: usize = 0;
@@ -238,15 +252,15 @@ impl DataSize for ObjClosure {
     }
 }
 
-impl std::fmt::Display for ObjClosure {
+impl std::fmt::Display for ObjClosure<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unsafe { write!(f, "{}", self.function.as_ref()) }
     }
 }
 
-impl ObjClosure {
+impl<'a> ObjClosure<'a> {
     #[inline]
-    pub fn new(function: NonNull<ObjFunction>) -> Self {
+    pub fn new(function: NonNull<ObjFunction<'a>>) -> Self {
         unsafe {
             Self {
                 obj: Obj::closure(),
@@ -303,8 +317,9 @@ impl ObjUpvalue {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ObjClass {
-    obj: Obj,
+    pub obj: Obj,
     pub name: NonNull<ObjString>,
+    pub methods: FnvHashMap<Value, Value>,
 }
 
 impl DataSize for ObjClass {
@@ -313,7 +328,7 @@ impl DataSize for ObjClass {
     const STATIC_HEAP_SIZE: usize = 0;
 
     fn estimate_heap_size(&self) -> usize {
-        unsafe { (*self.name.as_ptr()).estimate_heap_size() }
+        unsafe { (*self.name.as_ptr()).estimate_heap_size() + self.methods.estimate_heap_size() }
     }
 }
 
@@ -322,6 +337,7 @@ impl ObjClass {
         Self {
             obj: Obj::class(),
             name: name,
+            methods: FnvHashMap::default(),
         }
     }
 }
@@ -351,5 +367,33 @@ impl DataSize for ObjInstance {
 
     fn estimate_heap_size(&self) -> usize {
         self.fields.estimate_heap_size()
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ObjBoundMethod<'a> {
+    pub obj: Obj,
+    pub receiver: Value,
+    pub method: NonNull<ObjClosure<'a>>,
+}
+
+impl DataSize for ObjBoundMethod<'_> {
+    const IS_DYNAMIC: bool = false;
+
+    const STATIC_HEAP_SIZE: usize = 0;
+
+    fn estimate_heap_size(&self) -> usize {
+        0
+    }
+}
+
+impl<'a> ObjBoundMethod<'a> {
+    pub fn new(receiver: Value, method: NonNull<ObjClosure<'a>>) -> Self {
+        Self {
+            obj: Obj::bound_method(),
+            receiver,
+            method,
+        }
     }
 }
