@@ -76,7 +76,8 @@ impl CallFrame<'_> {
 
     #[inline]
     fn op_from_byte(&mut self) -> Result<OpCode> {
-        OpCode::try_from(self.read_byte()).map_err(|_| anyhow!(InterpretError::Runtime))
+        OpCode::try_from(self.read_byte())
+        .map_err(|_| anyhow!(InterpretError::Runtime))
     }
 }
 
@@ -550,6 +551,11 @@ impl<'a> Vm<'a> {
                         }
                         return Err(anyhow!(InterpretError::Runtime));
                     }
+                    OpCode::GetSuper => {
+                        let name = read_constant!();
+                        let Value::Obj(superclass) = self.pop() else { unreachable!() };
+                        self.bind_method(superclass.cast(), name)?;
+                    }
                     OpCode::Equal => compare!(==),
                     OpCode::Greater => compare!(>),
                     OpCode::GreaterEqual => compare!(>=),
@@ -609,6 +615,16 @@ impl<'a> Vm<'a> {
                         let arg_count = read_byte!();
                         self.frames[self.frame_count - 1] = frame;
                         self.invoke(method, arg_count)?;
+                        frame = self.frames[self.frame_count - 1];
+                    }
+                    OpCode::SuperInvoke => {
+                        let method = read_constant!();
+                        let arg_count = read_byte!();
+                        let Value::Obj(superclass) = self.pop() else {
+                            unreachable!();
+                        };
+                        self.frames[self.frame_count - 1] = frame;
+                        self.invoke_from_class(superclass.cast(), method, arg_count)?;
                         frame = self.frames[self.frame_count - 1];
                     }
                     OpCode::Closure => {
@@ -677,6 +693,22 @@ impl<'a> Vm<'a> {
                         let obj = self.new_obj(ObjClass::new(o.cast()));
                         self.push(Value::Obj(obj));
                     }
+                    OpCode::Inherit => {
+                        let superclass = self.peek(1);
+                        let subclass = self.peek(0);
+                        if let (Value::Obj(sup), Value::Obj(sub)) = (superclass, subclass) {
+                            unsafe {
+                                match (*sup.as_ptr()).kind {
+                                    ObjType::Class => {
+                                        let (sup, sub) = (sup.cast::<ObjClass>(), sub.cast::<ObjClass>());
+                                        (*sub.as_ptr()).methods = (*sup.as_ptr()).methods.clone();
+                                        self.pop();
+                                    }
+                                    _ => return Err(anyhow!("Superclass must be a class."))
+                                }
+                            }
+                        }
+                    }
                     OpCode::Method => {
                         let name = read_constant!();
                         let method = self.peek(0);
@@ -707,22 +739,27 @@ mod tests {
     fn test_functions() -> Result<()> {
         let mut vm = Vm::new();
         let source = r#"
-        class CoffeeMaker {
-            init(coffee) {
-              this.coffee = coffee;
-            }
-          
-            brew() {
-              print "Enjoy your cup of " + this.coffee;
-          
-              // No reusing the grounds!
-              this.coffee = nil;
+        class A {
+            method() {
+              print "A method";
             }
           }
-          for (var i = 0; i < 10; i = i + 1) {
-          var maker = CoffeeMaker("coffee and chicory");
-          maker.brew();
+          
+          var Bs_super = A;
+          class B < A {
+            method() {
+              print "B method";
+            }
+          
+            test() {
+              runtimeSuperCall(Bs_super, "method");
+            }
           }
+          
+          var Cs_super = B;
+          class C < B {}
+          
+          C().test();
         "#;
         let _ = vm.interpret(source);
         vm.collect_garbage();

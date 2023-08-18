@@ -92,7 +92,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
     const OR: Self              = Self(None,                    Some(Parser::or),       Precedence::Or);
     const PRINT: Self           = Self(None,                    None,                   Precedence::None);
     const RETURN: Self          = Self(None,                    None,                   Precedence::None);
-    const SUPER: Self           = Self(None,                    None,                   Precedence::None);
+    const SUPER: Self           = Self(Some(Parser::super_),    None,                   Precedence::None);
     const THIS: Self            = Self(Some(Parser::this),      None,                   Precedence::None);
     const TRUE: Self            = Self(Some(Parser::literal),   None,                   Precedence::None);
     const VAR: Self             = Self(None,                    None,                   Precedence::None);
@@ -213,6 +213,7 @@ pub struct Compiler<'a> {
 
 struct ClassCompiler {
     enclosing: Option<NonNull<ClassCompiler>>,
+    has_superclass: bool,
 }
 
 impl<'a> Compiler<'a> {
@@ -449,8 +450,23 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
         let mut class_compiler = ClassCompiler {
             enclosing: self.current_class,
+            has_superclass: false,
         };
+
         self.current_class = NonNull::new(&mut class_compiler as *mut ClassCompiler);
+        if self.match_token(Less)? {
+            self.consume_token(Identifier)?;
+            self.variable(false)?;
+            // Store superclass
+            self.begin_scope();
+            self.add_local("super");
+            self.define_variable(0);
+            self.named_variable(name_str, l, false)?;
+            self.emit_byte(OpCode::Inherit);
+            unsafe {
+                (*self.current_class.unwrap().as_ptr()).has_superclass = true;
+            }
+        }
 
         self.named_variable(name_str, l, false)?;
         self.consume_token(LeftBrace);
@@ -462,6 +478,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
         self.consume_token(RightBrace);
         self.emit_byte(OpCode::Pop);
+        if self.current_class.is_some_and(|c| unsafe { (*c.as_ptr()).has_superclass }) {
+            self.end_scope();
+        }
         self.current_class = unsafe { (*self.current_class.unwrap().as_ptr()).enclosing };
         Ok(())
     }
@@ -708,6 +727,35 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             }
             Ok(None)
         }
+    }
+
+    fn super_(&mut self, can_assign: bool) -> Result<()> {
+        if self.current_class.is_none() {
+            return Err(anyhow!("Can't use 'super' outside of a class."));
+        } else if let Some(curr) = self.current_class 
+        && unsafe { !(*curr.as_ptr()).has_superclass } {
+            return Err(anyhow!("Can't use 'super' in a class with no superclass."));
+        }
+        self.consume_token(Dot)?;
+        self.consume_token(Identifier)?;
+        let (line, Token::Identifier(name)) = self.prev.unwrap() else {
+            unreachable!()
+        };
+        let obj = self.heap.new_obj(ObjString::new(name.to_string()));
+        let name = self.add_constant(Value::Obj(obj));
+        self.named_variable("this", line, false);
+        if self.match_token(LeftParen)? {
+            let arg_count = self.argument_list()?;
+            self.named_variable("super", line, false)?;
+            self.emit_byte(OpCode::SuperInvoke);
+            self.emit_byte(name);
+            self.emit_byte(arg_count);
+        } else {
+            self.named_variable("super", line, false);
+            self.emit_byte(OpCode::GetSuper);
+            self.emit_byte(name);
+        }
+        Ok(())
     }
 
     fn variable(&mut self, can_assign: bool) -> Result<()> {

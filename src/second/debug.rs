@@ -11,26 +11,29 @@ pub fn disassemble(chunk: &Chunk, name: &str) {
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
     print!("{offset:04} ");
     let line = chunk.get_line(offset);
-    if line == 1 {
+    if offset == 0 {
         print!("0001 ");
     } else if line == chunk.get_line(offset.saturating_sub(1)) {
         print!("   | ");
     } else {
         print!("{:04} ", line + 1);
     }
-    match OpCode::try_from(chunk.code()[offset]).unwrap() {
+    return OpCode::try_from(chunk.code()[offset]).map(|op| match op {
         OpCode::Constant
         | OpCode::DefineGlobal
-        | OpCode::GetLocal
-        | OpCode::SetLocal
         | OpCode::GetGlobal
         | OpCode::SetGlobal
-        | OpCode::SetUpvalue
-        | OpCode::GetUpvalue
-        | OpCode::Class
         | OpCode::GetProperty
         | OpCode::SetProperty
-        | OpCode::Method => constant_inst(chunk, offset),
+        | OpCode::Method 
+        | OpCode::Class
+        | OpCode::GetSuper => constant_inst(chunk, offset),
+        OpCode::GetLocal
+        | OpCode::SetLocal
+        | OpCode::SetUpvalue
+        | OpCode::GetUpvalue 
+        | OpCode::Call => byte_inst(chunk, offset),
+        OpCode::Invoke => invoke_inst(chunk, offset),
         OpCode::Jump | OpCode::JumpIfFalse => jump_inst(chunk, 1, offset),
         OpCode::Loop => jump_inst(chunk, -1, offset),
         OpCode::Closure => {
@@ -44,7 +47,13 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
             offset + 2
         }
         _ => simple_inst(chunk, offset),
-    }
+    }).unwrap()//.unwrap_or({println!("unknown opcode value {:x}", chunk.code()[offset]); 1})
+}
+
+fn invoke_inst(chunk: &Chunk, offset: usize) -> usize {
+    let code = chunk.code();
+    println!("{:16?} ({}) {:4}", OpCode::try_from(code[offset]).unwrap(), code[offset + 1], code[offset + 2]);
+    offset + 3
 }
 
 pub fn jump_inst(chunk: &Chunk, sign: isize, offset: usize) -> usize {
