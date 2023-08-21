@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use enum_map::Enum;
+use itertools::Itertools;
 use std::iter::Peekable;
 
 #[derive(Debug, Clone, Copy)]
@@ -146,8 +147,8 @@ impl std::fmt::Display for TokenType {
         let s = match self {
             TokenType::LeftParen => "(",
             TokenType::RightParen => ")",
-            TokenType::LeftBrace => "{{",
-            TokenType::RightBrace => "}}",
+            TokenType::LeftBrace => "{",
+            TokenType::RightBrace => "}",
             TokenType::Comma => ",",
             TokenType::Dot => ".",
             TokenType::Minus => "-",
@@ -251,8 +252,8 @@ impl std::fmt::Display for Token<'_> {
         let s = match self {
             Token::LeftParen => "(",
             Token::RightParen => ")",
-            Token::LeftBrace => "{{",
-            Token::RightBrace => "}}",
+            Token::LeftBrace => "{",
+            Token::RightBrace => "}",
             Token::Comma => ",",
             Token::Dot => ".",
             Token::Minus => "-",
@@ -294,9 +295,9 @@ impl std::fmt::Display for Token<'_> {
 }
 
 #[derive(Debug, Clone)]
-pub enum ScanError<'a> {
+pub enum ScanError {
     UnterminatedString,
-    ParseNumError(&'a str),
+    //ParseNumError(&'a str),
     UnrecognizedCharacter(char),
     // ClosingParen,
     // Expected(ExpectedToken, Option<Token>),
@@ -304,11 +305,11 @@ pub enum ScanError<'a> {
     // StatementMissingExpr,
 }
 
-impl std::fmt::Display for ScanError<'_> {
+impl std::fmt::Display for ScanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ScanError::UnterminatedString => write!(f, "unterminated string"),
-            ScanError::ParseNumError(n) => todo!(),
+            //ScanError::ParseNumError(n) => write!(f, "could not parse {n} as a number."),
             ScanError::UnrecognizedCharacter(c) => write!(f, "unrecognized character '{c}'"),
         }
     }
@@ -339,152 +340,115 @@ where
 }
 
 pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
+    //let mut chars = source.char_indices();
+    // weird to let user facing stuff be zero-indexed, even if it is a programming language.
+    let mut line = 1;
+    let mut col = 0;
     source
-        .lines()
-        .enumerate()
-        .flat_map(|(i, line)| scan_line(line).map(move |(j, t)| Parsed((i, j), t)))
+        .char_indices()
         .peekable()
-}
-
-struct LineScanner<'a> {
-    line: &'a str,
-    curr_byte: usize,
-}
-
-impl<'a> Iterator for LineScanner<'a> {
-    type Item = (usize, Result<Token<'a>>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let pack = |i, t: Token<'a>| Some((i, Ok(t)));
-
-        //let chars = self.source.as_bytes()[self.curr..].iter().map(|b| *b as char);
-        let c = self.advance()?;
-        let i = self.curr_byte;
-        if i > self.line.len() {
-            return None;
-        }
-        match c {
-            '"' => {
-                let start = self.curr_byte;
-                while !self.is_at_end() {
-                    if self.advance()? == '"' {
-                        return pack(start, Token::String(&self.line[start..self.curr_byte - 1]));
+        .batching(move |chars| {
+            use Token::*;
+            macro_rules! advance {
+                () => {{
+                    col += 1;
+                    let next = chars.next();
+                    if next?.1 == '\n' {
+                        line += 1;
+                        col = 0;
                     }
+                    next
+                }};
+            }
+            loop {
+                let (i, c) = advance!()?;
+                let start = col;
+                macro_rules! pack {
+                    ($res:expr) => {
+                        Some(Parsed((line, start), $res))
+                    };
+
+                    ($c1:ident, $c2:ident) => {{
+                        match chars.peek() {
+                            Some((_, '=')) => {
+                                advance!();
+                                return pack!(Ok($c1));
+                            }
+                            _ => return pack!(Ok($c2)),
+                        }
+                    }}
                 }
-                // if we reach this point it means we've reached the end of the line
-                Some((start, Err(anyhow!(ScanError::UnterminatedString))))
-            }
-            // Code specific to handling comments
-            '/' => match self.peek() {
-                Some('/') => None,
-                _ => pack(self.curr_byte, Token::Slash),
-            },
-            // One or two character tokens
-            '!' => pack(i, self.consume_if_eq(Token::Bang)),
-            '=' => pack(i, self.consume_if_eq(Token::Equal)),
-            '>' => pack(i, self.consume_if_eq(Token::Greater)),
-            '<' => pack(i, self.consume_if_eq(Token::Less)),
+                match c {
+                    '"' => {
+                        while let Some((j, next)) = advance!() {
+                            if next == '"' {
+                                return pack!(Ok(String(&source[i + 1..j])));
+                            }
+                        }
+                        // if we reach this point it means we've reached the end of the source code
+                        return pack!(Err(anyhow!(ScanError::UnterminatedString)));
+                    }
+                    // Code specific to handling comments
+                    '/' => match chars.peek() {
+                        Some((_, '/')) => {
+                            let curr = line;
+                            while line == curr {
+                                advance!();
+                            }
+                            continue;
+                        }
+                        _ => return pack!(Ok(Slash)),
+                    },
+                    // One or two character tokens
+                    '!' => pack!(BangEqual, Bang),
+                    '=' => pack!(EqualEqual, Equal),
+                    '>' => pack!(GreaterEqual, Greater),
+                    '<' => pack!(LessEqual, Less),
 
-            // Invariably single character tokens
-            c @ ('(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*') => {
-                pack(i, Token::from_char(c)?)
-            }
-            x if x.is_ascii_digit() => Some((i, self.parse_number())),
-            a if a == '_' || a.is_ascii_alphabetic() => pack(i, self.parse_word()),
-            w if w.is_whitespace() => self.next(),
-            c => Some((i, Err(anyhow!(ScanError::UnrecognizedCharacter(c))))),
-        }
-    }
-}
+                    // Invariably single character tokens
+                    c @ ('(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*') => {
+                        return pack!(Ok(Token::from_char(c)?))
+                    }
+                    x if x.is_ascii_digit() => {
+                        let mut end = i + 1;
+                        while chars.peek().is_some_and(|(_, c)| c.is_ascii_digit()) {
+                            advance!();
+                            end += 1;
+                        }
 
-fn scan_line(source: &str) -> LineScanner {
-    LineScanner {
-        line: source,
-        curr_byte: 0,
-    }
-}
+                        let mut clone = chars.clone();
+                        if let Some((_, '.')) = clone.next() {
+                            if clone.next().is_some_and(|(_, c)| c.is_ascii_digit()) {
+                                advance!();
+                                while chars.peek().is_some_and(|(_, c)| c.is_ascii_digit()) {
+                                    end += 1;
+                                    advance!();
+                                }
+                                end += 1;
+                            }
+                        }
+                        let num = source[i..end]
+                            .parse()
+                            .map_err(|_| anyhow!("error parsing number {}.", &source[i..end]))
+                            .map(Token::Number);
+                        return pack!(num);
+                    }
+                    a if a == '_' || a.is_ascii_alphabetic() => {
+                        let mut end = i + 1;
+                        while chars
+                            .peek()
+                            .is_some_and(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+                        {
+                            end += 1;
+                            advance!();
+                        }
 
-impl<'a> LineScanner<'a> {
-    pub fn init(source: &'a str) -> Self {
-        Self {
-            line: source,
-            curr_byte: 0,
-        }
-    }
-
-    #[inline]
-    fn peek(&self) -> Option<char> {
-        if self.curr_byte >= self.line.len() {
-            return None;
-        }
-        Some(self.line.as_bytes()[self.curr_byte] as char)
-    }
-
-    #[inline]
-    fn advance(&mut self) -> Option<char> {
-        self.curr_byte += 1;
-        if self.curr_byte > self.line.len() {
-            return None;
-        }
-        Some(self.line.as_bytes()[self.curr_byte - 1] as char)
-    }
-
-    #[inline]
-    fn is_at_end(&self) -> bool {
-        self.curr_byte >= self.line.len()
-    }
-
-    fn consume_if_eq(&mut self, token: Token<'a>) -> Token<'a> {
-        if self.peek() == Some('=') {
-            self.advance();
-            match token {
-                Token::Bang => Token::BangEqual,
-                Token::Equal => Token::EqualEqual,
-                Token::Greater => Token::GreaterEqual,
-                Token::Less => Token::LessEqual,
-                _ => unreachable!(),
-            }
-        } else {
-            token
-        }
-    }
-
-    fn parse_number(&mut self) -> Result<Token<'a>> {
-        let start = self.curr_byte - 1;
-
-        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-            self.advance();
-        }
-
-        if self.peek() == Some('.') {
-            println!("found '.'");
-            if self.line.as_bytes()[self.curr_byte].is_ascii_digit() {
-                self.advance();
-                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    self.advance();
+                        return pack!(Ok(Token::from_str(&source[i..end])));
+                    }
+                    w if w.is_whitespace() => continue,
+                    c => return pack!(Err(anyhow!(ScanError::UnrecognizedCharacter(c)))),
                 }
             }
-        }
-        let num_str = &self.line[start..self.curr_byte];
-        num_str
-            .trim()
-            .parse()
-            .map_err(|_| anyhow!("error parsing number {}.", num_str))
-            .map(Token::Number)
-    }
-
-    // Parses a string of characters that can begin with a letter or '_', and determines whether it is an keyword or an identifier
-    // Returns a `Token` as this will always be valid, since we start with one valid character (which is a valid identifier alone) and stop at the first invalid character
-    // validating the identifier itself comes in the next pass.
-    fn parse_word(&mut self) -> Token<'a> {
-        let start = self.curr_byte - 1;
-        while self
-            .peek()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        {
-            self.advance();
-        }
-
-        Token::from_str(&self.line[start..self.curr_byte])
-    }
+        })
+        .peekable()
 }

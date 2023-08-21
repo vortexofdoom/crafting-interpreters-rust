@@ -1,11 +1,17 @@
 #![feature(let_chains)]
-#![allow(non_upper_case_globals, unused)]
+#![allow(non_upper_case_globals)]
 mod first;
 mod second;
+
+use std::alloc::System;
 
 use anyhow::Result;
 use clap::Parser;
 use second::Vm;
+use stats_alloc::{StatsAlloc, INSTRUMENTED_SYSTEM};
+
+#[global_allocator]
+static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[derive(Debug, Parser)]
 pub struct LoxArgs {

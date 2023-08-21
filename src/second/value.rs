@@ -1,24 +1,21 @@
 use std::{
     cell::Cell,
     hash::Hash,
-    marker::PhantomData,
     ops::Deref,
     ptr::NonNull,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Result};
-use datasize::DataSize;
+#[cfg(feature = "nan-boxing")]
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
-use super::{
-    chunk::Chunk,
-    memory::Heap,
-    object::{
-        Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative, ObjString,
-        ObjType, ObjUpvalue,
-    },
+use anyhow::{anyhow, Result};
+
+use super::object::{
+    Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjString, ObjType,
 };
 
+#[cfg(not(feature = "nan-boxing"))]
 #[derive(Debug, Clone, Copy)]
 pub enum Value {
     Bool(bool),
@@ -27,74 +24,176 @@ pub enum Value {
     Nil,
 }
 
-impl DataSize for Value {
-    const IS_DYNAMIC: bool = true;
+#[cfg(not(feature = "nan-boxing"))]
+impl Value {
+    // Just a constant so that it works with both cfgs
+    pub const NIL: Self = Self::Nil;
+}
 
-    const STATIC_HEAP_SIZE: usize = 0;
+#[cfg(feature = "nan-boxing")]
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub struct Value(u64);
 
-    fn estimate_heap_size(&self) -> usize {
-        match self {
-            Value::Obj(o) => unsafe {
-                let o = o.as_ptr();
-                match (*o).kind {
-                    ObjType::BoundMethod => (*o.cast::<ObjBoundMethod>()).estimate_heap_size(),
-                    ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
-                    ObjType::Closure => (*o.cast::<ObjClosure>()).estimate_heap_size(),
-                    ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
-                    ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
-                    ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
-                    ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).estimate_heap_size(),
-                    ObjType::Instance => (*o.cast::<ObjInstance>()).estimate_heap_size(),
-                }
-            },
-            _ => 0,
-        }
+#[cfg(feature = "nan-boxing")]
+impl Value {
+    pub const NIL: Self = Self(QNAN | NIL_TAG);
+    pub const FALSE: Self = Self(QNAN | FALSE_TAG);
+    pub const TRUE: Self = Self(QNAN | TRUE_TAG);
+}
+
+#[cfg(feature = "nan-boxing")]
+const SIGN_BIT: u64 = 0x8000000000000000;
+/// NAN bits for IEEE 754 + quiet bit + Intel FP Indefinate value
+#[cfg(feature = "nan-boxing")]
+const QNAN: u64 = 0x7ffc000000000000;
+#[cfg(feature = "nan-boxing")]
+const NIL_TAG: u64 = 0b01;
+#[cfg(feature = "nan-boxing")]
+const FALSE_TAG: u64 = 0b10;
+#[cfg(feature = "nan-boxing")]
+const TRUE_TAG: u64 = 0b11;
+#[cfg(feature = "nan-boxing")]
+const OBJ_TAG: u64 = SIGN_BIT | QNAN;
+
+#[cfg(feature = "nan-boxing")]
+impl From<Value> for u64 {
+    fn from(value: Value) -> Self {
+        value.0
     }
 }
 
-impl Eq for Value {}
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ValueType {
+    Number,
+    Bool,
+    Obj,
+    Nil,
+}
 
-impl Hash for Value {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            Value::Bool(b) => b.hash(state),
-            Value::Number(n) => n.to_bits().hash(state),
-            Value::Obj(o) => unsafe {
-                (*o.cast::<ObjString>().as_ptr()).hash(state);
-            },
-            Value::Nil => (),
+impl From<Value> for ValueType {
+    fn from(value: Value) -> Self {
+        if value.as_num().is_ok() {
+            ValueType::Number
+        } else if value.as_bool().is_ok() {
+            ValueType::Bool
+        } else if value.as_obj().is_ok() {
+            ValueType::Obj
+        } else {
+            ValueType::Nil
         }
     }
 }
 
 impl Value {
-    pub fn is_truthy(&self) -> bool {
+    pub fn as_num(self) -> Result<f64> {
+        #[cfg(feature = "nan-boxing")]
+        match self.0 & QNAN != QNAN {
+            true => Ok(f64::from_bits(self.0)),
+            false => Err(anyhow!("Not a number")),
+        }
+
+        #[cfg(not(feature = "nan-boxing"))]
         match self {
-            Value::Bool(b) => *b,
-            Value::Nil => false,
-            _ => true,
+            Value::Number(n) => Ok(n),
+            _ => Err(anyhow!("Not a number")),
         }
     }
 
-    pub fn new_string(string: String) -> Self {
-        let obj = ObjString::new(string);
-        let ptr = NonNull::new(Box::into_raw(Box::new(obj)))
-            .expect("just created a string")
-            .cast();
-        Self::Obj(ptr)
+    pub fn as_bool(self) -> Result<bool> {
+        #[cfg(feature = "nan-boxing")]
+        match self & Self::FALSE == Self::FALSE {
+            true => Ok(self == Self::TRUE),
+            false => Err(anyhow!("Not a bool")),
+        }
+        #[cfg(not(feature = "nan-boxing"))]
+        match self {
+            Value::Bool(b) => Ok(b),
+            _ => Err(anyhow!("Not a bool")),
+        }
     }
 
-    pub fn clock(args: Option<&[Cell<Self>]>) -> Self {
-        Self::Number(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0)
+    pub fn as_obj(self) -> Result<NonNull<Obj>> {
+        #[cfg(feature = "nan-boxing")]
+        match self.0 & OBJ_TAG == OBJ_TAG {
+            true => Ok(NonNull::new((self.0 & !OBJ_TAG) as *mut Obj).unwrap()),
+            false => Err(anyhow!("Not an object")),
+        }
+        #[cfg(not(feature = "nan-boxing"))]
+        match self {
+            Value::Obj(o) => Ok(o),
+            _ => Err(anyhow!("Not an object")),
+        }
+    }
+}
+
+impl<T> From<Option<T>> for Value
+where
+    T: Into<Value>,
+{
+    fn from(value: Option<T>) -> Self {
+        value.map(|v| v.into()).unwrap_or(Self::NIL)
+    }
+}
+
+// impl DataSize for Value {
+//     const IS_DYNAMIC: bool = true;
+
+//     const STATIC_HEAP_SIZE: usize = 0;
+
+//     fn estimate_heap_size(&self) -> usize {
+//         unsafe {
+//             self.as_obj()
+//                 .map(|o| {
+//                     let o = o.as_ptr();
+//                     match (*o).kind {
+//                         ObjType::BoundMethod => (*o.cast::<ObjBoundMethod>()).estimate_heap_size(),
+//                         ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
+//                         ObjType::Closure => (*o.cast::<ObjClosure>()).estimate_heap_size(),
+//                         ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
+//                         ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
+//                         ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
+//                         ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).estimate_heap_size(),
+//                         ObjType::Instance => (*o.cast::<ObjInstance>()).estimate_heap_size(),
+//                     }
+//                 })
+//                 .unwrap_or(0)
+//         }
+//     }
+// }
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match (self.as_bool(), self.as_num(), self.as_obj()) {
+            (Ok(b), _, _) => b.hash(state),
+            (_, Ok(n), _) => n.to_bits().hash(state),
+            (_, _, Ok(o)) => unsafe {
+                (*o.cast::<ObjString>().as_ptr()).hash(state);
+            },
+            _ => (),
+        }
+    }
+}
+
+impl Value {
+    pub fn is_truthy(self) -> bool {
+        self.as_bool().unwrap_or(self != Self::NIL)
+    }
+
+    pub fn clock(_: Option<&[Cell<Self>]>) -> Self {
+        Self::from(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0)
     }
 }
 
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Number(n) => write!(f, "{n}"),
-            Value::Obj(o) => unsafe {
+        //#[cfg(not(feature = "nan-boxing"))]
+        match (self.as_bool(), self.as_num(), self.as_obj()) {
+            (Ok(b), _, _) => write!(f, "{b}"),
+            (_, Ok(n), _) => write!(f, "{n}"),
+            (_, _, Ok(o)) => unsafe {
                 // SAFETY: The ObjType enum's entire usage is to validate these pointer casts.
                 // a *const ObjType::String will only ever be generated from a *const ObjString
                 match o.as_ref().kind {
@@ -115,7 +214,7 @@ impl std::fmt::Display for Value {
                     ObjType::Instance => write!(
                         f,
                         "{} instance",
-                        Value::Obj((*o.cast::<ObjInstance>().as_ptr()).class.cast())
+                        Value::from((*o.cast::<ObjInstance>().as_ptr()).class.cast())
                     ),
                     ObjType::BoundMethod => write!(
                         f,
@@ -124,41 +223,41 @@ impl std::fmt::Display for Value {
                     ),
                 }
             },
-            Value::Nil => write!(f, "nil"),
+            _ => write!(f, "nil"),
         }
     }
 }
 
-impl std::ops::Add for Value {
-    type Output = Result<Self>;
+// impl std::ops::Add for Value {
+//     type Output = Result<Self>;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        unsafe {
-            match (self, rhs) {
-                (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
-                (Value::Obj(o), _) | (_, Value::Obj(o))
-                    if (*o.as_ptr()).kind == ObjType::String =>
-                {
-                    // this memory is leaked atm, either need a custom allocator or a hack.
-                    let new_string = ObjString::new(format!("{self}{rhs}"));
-                    let ptr = NonNull::new(Box::into_raw(Box::new(new_string)))
-                        .unwrap()
-                        .cast();
-                    Ok(Value::Obj(ptr))
-                }
-                _ => Err(anyhow!("cannot add {self} and {rhs}")),
-            }
-        }
-    }
-}
+//     fn add(self, rhs: Self) -> Self::Output {
+//         unsafe {
+//             match (self, rhs) {
+//                 (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
+//                 (Value::Obj(o), _) | (_, Value::Obj(o))
+//                     if (*o.as_ptr()).kind == ObjType::String =>
+//                 {
+//                     // this memory is leaked atm, either need a custom allocator or a hack.
+//                     let new_string = ObjString::new(format!("{self}{rhs}"));
+//                     let ptr = NonNull::new(Box::into_raw(Box::new(new_string)))
+//                         .unwrap()
+//                         .cast();
+//                     Ok(Value::Obj(ptr))
+//                 }
+//                 _ => Err(anyhow!("cannot add {self} and {rhs}")),
+//             }
+//         }
+//     }
+// }
 
 impl std::ops::Sub for Value {
     type Output = Result<Self>;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x - y)),
-            _ => Err(anyhow!("cannot subtract {self} and {rhs}")),
+        match (self.as_num(), rhs.as_num()) {
+            (Ok(x), Ok(y)) => Ok(Value::from(x - y)),
+            _ => Err(anyhow!("cannot subtract {rhs} from {self}")),
         }
     }
 }
@@ -167,9 +266,9 @@ impl std::ops::Div for Value {
     type Output = Result<Self>;
 
     fn div(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x / y)),
-            _ => Err(anyhow!("cannot divide {self} and {rhs}")),
+        match (self.as_num(), rhs.as_num()) {
+            (Ok(x), Ok(y)) => Ok(Value::from(x / y)),
+            _ => Err(anyhow!("cannot divide {self} by {rhs}")),
         }
     }
 }
@@ -178,9 +277,9 @@ impl std::ops::Mul for Value {
     type Output = Result<Self>;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x * y)),
-            _ => Err(anyhow!("cannot multiply {self} and {rhs}")),
+        match (self.as_num(), rhs.as_num()) {
+            (Ok(x), Ok(y)) => Ok(Value::from(x * y)),
+            _ => Err(anyhow!("cannot multiply {self} by {rhs}")),
         }
     }
 }
@@ -189,8 +288,8 @@ impl std::ops::Neg for Value {
     type Output = Result<Self>;
 
     fn neg(self) -> Self::Output {
-        match self {
-            Self::Number(n) => Ok(Self::Number(-n)),
+        match self.as_num() {
+            Ok(n) => Ok(Self::from(-n)),
             _ => Err(anyhow!("cannot negate {self}")),
         }
     }
@@ -200,41 +299,45 @@ impl std::ops::Not for Value {
     type Output = Self;
 
     fn not(self) -> Self::Output {
-        match self {
-            Self::Bool(b) => Self::Bool(!b),
-            _ => Self::Bool(!self.is_truthy()),
-        }
+        Self::from(!self.is_truthy())
     }
 }
 
 impl std::cmp::PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Bool(l), Self::Bool(r)) => l == r,
-            (Self::Number(l), Self::Number(r)) => l == r,
-            (Self::Obj(l), Self::Obj(r)) => unsafe {
+        if let (Ok(l), Ok(r)) = (self.as_obj(), other.as_obj()) {
+            unsafe {
                 (*l.as_ptr()).kind == (*r.as_ptr()).kind
                     && match (*l.as_ptr()).kind {
                         ObjType::String => {
                             l.cast::<ObjString>().as_ref() == r.cast::<ObjString>().as_ref()
                         }
-                        ObjType::Function => {
-                            l.cast::<ObjFunction>().as_ref() == r.cast::<ObjFunction>().as_ref()
-                        }
                         // Could make this more robust
                         _ => false,
                     }
-            },
-            (Self::Nil, Self::Nil) => true,
-            _ => false,
+            }
+        } else {
+            #[cfg(not(feature = "nan-boxing"))]
+            match (self, other) {
+                (Self::Bool(l), Self::Bool(r)) => l == r,
+                (Self::Number(l), Self::Number(r)) => l == r,
+                (Self::Nil, Self::Nil) => true,
+                _ => false,
+            }
+            #[cfg(feature = "nan-boxing")]
+            if let (Ok(l), Ok(r)) = (self.as_num(), other.as_num()) {
+                l == r
+            } else {
+                self.0 == other.0
+            }
         }
     }
 }
 
 impl std::cmp::PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Self::Number(x), Self::Number(y)) => x.partial_cmp(y),
+        match (self.as_num(), other.as_num()) {
+            (Ok(x), Ok(y)) => x.partial_cmp(&y),
             _ => None,
         }
     }
@@ -242,9 +345,88 @@ impl std::cmp::PartialOrd for Value {
 
 impl PartialEq<str> for Value {
     fn eq(&self, other: &str) -> bool {
-        match self {
-            Self::Obj(o) => unsafe { o.cast::<ObjString>().as_ref().deref() == other },
-            _ => false,
+        self.as_obj()
+            .map(|o| unsafe { o.cast::<ObjString>().as_ref().deref() == other })
+            .unwrap_or(false)
+    }
+}
+
+macro_rules! impl_op {
+    ($name:ident<$t:ident>, $fun:tt, $op:tt) => {
+        #[cfg(feature = "nan-boxing")]
+        impl<$t> $name<$t> for Value
+        where $t: Into<u64> {
+            type Output = Self;
+
+            fn $fun(self, rhs: $t) -> Self::Output {
+                Self(self.0 $op rhs.into())
+            }
+        }
+    };
+
+    ($name:tt, $fun:tt, $op:tt) => {
+        #[cfg(feature = "nan-boxing")]
+        impl $name for Value {
+            fn $fun(&mut self, rhs: Self) {
+                self.0 $op rhs.0;
+            }
+        }
+    };
+}
+
+impl_op!(BitAnd<T>, bitand, &);
+impl_op!(BitOr<T>, bitor, |);
+impl_op!(BitOrAssign, bitor_assign, |=);
+impl_op!(BitAndAssign, bitand_assign, &=);
+
+macro_rules! impl_from {
+    ($ty:ty, $var:tt, $value:ident, $expr:expr$(,)?) => {
+        impl From<$ty> for Value {
+            #[cfg(feature = "nan-boxing")]
+            fn from($value: $ty) -> Self {
+                $expr
+            }
+
+            #[cfg(not(feature = "nan-boxing"))]
+            fn from(value: $ty) -> Self {
+                Self::$var(value)
+            }
+        }
+    };
+}
+
+impl_from!(bool, Bool, value, Value::FALSE | value);
+impl_from!(f64, Number, value, Self(value.to_bits()));
+impl_from!(
+    NonNull<Obj>,
+    Obj,
+    value,
+    Self(SIGN_BIT | QNAN | value.as_ptr() as u64),
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_type() {
+        let obj = Value::from(
+            NonNull::new(Box::into_raw(Box::new(ObjString::new(String::new()))))
+                .unwrap()
+                .cast(),
+        );
+        let bool = Value::from(true);
+        let num = Value::from(5.0);
+        assert!(obj.as_obj().is_ok());
+        assert!(bool.as_bool().unwrap());
+        assert!(num.as_num().is_ok());
+        assert_eq!(ValueType::from(obj), ValueType::Obj);
+        assert_eq!(ValueType::from(bool), ValueType::Bool);
+        assert_eq!(ValueType::from(num), ValueType::Number);
+        assert_eq!(ValueType::from(Value::NIL), ValueType::Nil);
+        unsafe {
+            drop(Box::from_raw(
+                obj.as_obj().unwrap().cast::<ObjString>().as_ptr(),
+            ));
         }
     }
 }

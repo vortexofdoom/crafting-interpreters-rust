@@ -1,7 +1,5 @@
-use datasize::DataSize;
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-
 use super::value::Value;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
@@ -47,7 +45,7 @@ pub enum OpCode {
     Method,
 }
 
-#[derive(Debug, Default, Clone, DataSize)]
+#[derive(Debug, Default, Clone)]
 pub struct Chunk {
     code: Vec<u8>,
     lines: Vec<usize>,
@@ -62,11 +60,6 @@ impl Chunk {
     #[inline]
     pub fn code(&self) -> &[u8] {
         &self.code
-    }
-
-    #[inline]
-    pub fn lines(&self) -> &[usize] {
-        &self.lines
     }
 
     #[inline]
@@ -107,14 +100,8 @@ impl Chunk {
         self.code.push(op.into());
     }
 
-    pub fn write_bytes(&mut self, bytes: &[u8], line: usize) {
-        for byte in bytes {
-            self.write(*byte, line)
-        }
-    }
-
-    pub fn add_constant(&mut self, value: Value) -> u8 {
+    pub fn add_constant(&mut self, value: Value) -> usize {
         self.constants.push(value);
-        (self.constants.len() - 1) as u8
+        self.constants.len() - 1
     }
 }

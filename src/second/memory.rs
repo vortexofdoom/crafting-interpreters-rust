@@ -1,44 +1,21 @@
 use std::{
-    alloc::{GlobalAlloc, System},
-    ptr::{slice_from_raw_parts, NonNull},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    },
+    ptr::NonNull,
+    sync::atomic::{AtomicIsize, Ordering},
 };
+
+use crate::GLOBAL;
 
 use super::{
+    compiler::Compiler,
     object::{
         IsObj, Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjNative,
-        ObjString, ObjType, ObjUpvalue,
+        ObjString, ObjType, ObjUpvalue, Upvalue,
     },
     value::Value,
-    Vm,
 };
 
-pub static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-pub static NEXT_GC: AtomicUsize = AtomicUsize::new(1024 * 1024);
-const GC_GROW_FACTOR: usize = 2;
-#[global_allocator]
-static ALLOC: LoxAlloc = LoxAlloc;
-
-unsafe impl GlobalAlloc for LoxAlloc {
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        let ret = System.alloc(layout);
-        if !ret.is_null() {
-            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
-        }
-        ret
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
-        System.dealloc(ptr, layout);
-        ALLOCATED.fetch_sub(layout.size(), Ordering::Relaxed);
-    }
-}
-
-#[derive(Debug)]
-pub struct LoxAlloc;
+pub static NEXT_GC: AtomicIsize = AtomicIsize::new(3);
+const GC_GROW_FACTOR: isize = 2;
 
 #[derive(Debug)]
 pub struct Heap {
@@ -49,14 +26,14 @@ pub struct Heap {
 impl Heap {
     pub fn new() -> Self {
         Self {
-            objects: None,
             graystack: vec![],
+            objects: None,
         }
     }
 
     pub fn new_obj<T: IsObj>(&mut self, obj: T) -> NonNull<Obj> {
-        let size = obj.size();
-        let mut new: NonNull<Obj> = NonNull::new(Box::into_raw(Box::new(obj)).cast()).unwrap();
+        //println!("currently allocated: {}, next GC: {}", GLOBAL.stats().bytes_reallocated, NEXT_GC.load(Ordering::Relaxed));
+        let new: NonNull<Obj> = NonNull::new(Box::into_raw(Box::new(obj)).cast()).unwrap();
         unsafe {
             (*new.as_ptr()).next = self.objects;
             self.objects = Some(new);
@@ -75,66 +52,41 @@ impl Heap {
         }
     }
 
-    pub fn mark_vm_roots(&mut self, vm: *const Vm) {
-        unsafe {
-            self.mark_value((*vm).init_string);
-
-            for val in &(*vm).stack[..(*vm).sp] {
-                self.mark_value(val.get());
+    pub fn mark_compiler_roots(&mut self, compiler: NonNull<Compiler>) {
+        let mut compiler = Some(compiler);
+        while let Some(c) = compiler {
+            unsafe {
+                self.mark_obj((*c.as_ptr()).function.cast());
+                compiler = (*c.as_ptr()).enclosing
             }
-
-            for (name, value) in (*vm).globals.iter() {
-                self.mark_value(*name);
-                self.mark_value(*value);
-            }
-
-            for frame in &(*vm).frames[..(*vm).frame_count] {
-                let obj = NonNull::new(frame.closure.cast_mut().cast()).unwrap();
-                self.mark_obj(obj);
-            }
-
-            let mut upvalue = (*vm).open_upvalues;
-            while let Some(uv) = upvalue {
-                self.mark_obj(uv.cast());
-                upvalue = Some(uv);
-            }
-
-            // let mut objects = self.objects;
-            // while let Some(obj) = objects {
-            //     if (*obj.as_ptr()).is_marked {
-            //         println!("{} is marked", Value::Obj(obj));
-            //     } else {
-            //         println!("{} is not marked", Value::Obj(obj));
-            //     }
-            //     objects = (*obj.as_ptr()).next;
-            // }
         }
     }
 
-    fn mark_obj(&mut self, obj: NonNull<Obj>) {
+    pub fn mark_obj(&mut self, obj: NonNull<Obj>) {
         unsafe {
+            //println!("checking: {}", Value::from(obj));
             if !(*obj.as_ptr()).is_marked {
+                //println!("marking: {}", Value::from(obj));
                 (*obj.as_ptr()).is_marked = true;
                 self.graystack.push(obj);
             }
         }
     }
 
-    fn mark_value(&mut self, value: Value) {
-        if let Value::Obj(o) = value {
+    pub fn mark_value(&mut self, value: Value) {
+        if let Ok(o) = value.as_obj() {
             self.mark_obj(o);
         }
     }
 
     pub fn trace_references(&mut self) {
         while let Some(obj) = self.graystack.pop() {
-            self.blacken_object(obj);
+            self.blacken_object(obj.as_ptr());
         }
     }
 
-    fn blacken_object(&mut self, obj: NonNull<Obj>) {
+    fn blacken_object(&mut self, obj: *mut Obj) {
         unsafe {
-            let obj = obj.as_ptr();
             match (*obj).kind {
                 ObjType::Function => {
                     for val in (*obj.cast::<ObjFunction>()).chunk.constants() {
@@ -148,7 +100,11 @@ impl Heap {
                         self.mark_obj(uv.cast());
                     }
                 }
-                ObjType::Upvalue => self.mark_value((*obj.cast::<ObjUpvalue>()).closed.get()),
+                ObjType::Upvalue => {
+                    if let Upvalue::Closed(closed) = &(*obj.cast::<ObjUpvalue>()).value {
+                        self.mark_value(closed.get());
+                    }
+                }
                 ObjType::Instance => {
                     let instance = obj.cast::<ObjInstance>();
                     self.mark_obj((*instance).class.cast());
@@ -164,6 +120,7 @@ impl Heap {
                 }
                 ObjType::Class => {
                     let class = obj.cast::<ObjClass>();
+                    self.mark_obj((*class).name.cast());
                     for (k, v) in (*class).methods.iter() {
                         self.mark_value(*k);
                         self.mark_value(*v)
@@ -188,7 +145,7 @@ impl Heap {
     }
 
     pub fn sweep(&mut self) {
-        let prev_bytes = ALLOCATED.load(Ordering::Relaxed);
+        //let prev_bytes = GLOBAL.stats().bytes_reallocated;
         let mut prev = None;
         let mut object = self.objects;
         while let Some(obj) = object {
@@ -209,7 +166,7 @@ impl Heap {
                 }
             }
         }
-        let new = ALLOCATED.load(Ordering::Relaxed);
+        let new = GLOBAL.stats().bytes_reallocated;
         NEXT_GC.store(new * GC_GROW_FACTOR, Ordering::Relaxed);
         //println!("finished GC. Prev bytes: {prev_bytes}, current bytes: {new}");
     }

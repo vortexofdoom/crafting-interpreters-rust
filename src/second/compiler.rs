@@ -1,18 +1,22 @@
-use std::{iter::Peekable, ops::Index, ptr::NonNull};
-
 use anyhow::{anyhow, Result};
-use enum_map::{Enum, EnumMap};
+use enum_map::Enum;
+use std::{
+    iter::Peekable,
+    ptr::{addr_of_mut, NonNull},
+};
+
+use crate::GLOBAL;
 
 use super::{
     chunk::{Chunk, OpCode},
-    memory::Heap,
-    object::{FunctionType, Obj, ObjClass, ObjFunction, ObjString},
+    memory::NEXT_GC,
+    object::{FunctionType, IsObj, Obj, ObjFunction, ObjString},
     scanner::{
         scan, Parsed, Token,
         TokenType::{self, *},
     },
     value::Value,
-    InterpretError,
+    Vm,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
@@ -177,7 +181,7 @@ struct Local<'a> {
 impl Default for Local<'_> {
     fn default() -> Self {
         Self {
-            name: Default::default(),
+            name: "",
             depth: -1,
             is_captured: false,
         }
@@ -202,13 +206,13 @@ struct UpValue {
 
 #[derive(Debug)]
 pub struct Compiler<'a> {
-    pub function: Box<ObjFunction<'a>>,
+    pub function: NonNull<ObjFunction>,
     fun_type: FunctionType,
-    enclosing: Option<NonNull<Self>>,
+    pub enclosing: Option<NonNull<Self>>,
     locals: [Local<'a>; 256],
     upvalues: [UpValue; 256],
     scope_depth: usize,
-    local_count: u8,
+    local_count: usize,
 }
 
 struct ClassCompiler {
@@ -220,15 +224,14 @@ impl<'a> Compiler<'a> {
     const MAX_LOCALS: usize = 256;
 
     fn new(
-        name: Option<&'a str>,
+        function: NonNull<ObjFunction>,
         enclosing: Option<NonNull<Self>>,
         fun_type: FunctionType,
-        heap: &mut Heap,
     ) -> Self {
         let mut compiler = Self {
-            function: Box::new(ObjFunction::new(name)),
+            function,
             fun_type,
-            enclosing: enclosing,
+            enclosing,
             locals: [Local::default(); 256],
             upvalues: [UpValue::default(); 256],
             local_count: 1,
@@ -244,32 +247,25 @@ impl<'a> Compiler<'a> {
         compiler
     }
 
-    #[inline]
-    fn local_count(&self) -> usize {
-        self.local_count as usize
-    }
-
     fn add_upvalue(&mut self, index: u8, is_local: bool) -> Result<u8> {
-        unsafe {
-            let function = &mut self.function;
-            let count = function.upvalue_count;
+        let function = unsafe { self.function.as_mut() };
+        let count = function.upvalue_count;
 
-            for i in 0..count {
-                let upvalue = self.upvalues[i as usize];
-                if upvalue.index == index && upvalue.is_local == is_local {
-                    return Ok(i);
-                }
+        for i in 0..count {
+            let upvalue = self.upvalues[i as usize];
+            if upvalue.index == index && upvalue.is_local == is_local {
+                return Ok(i);
             }
-
-            self.upvalues[count as usize].index = index;
-            self.upvalues[count as usize].is_local = is_local;
-            let overflow;
-            (function.upvalue_count, overflow) = count.overflowing_add(1);
-            if overflow {
-                return Err(anyhow!("Too many upvalues"));
-            }
-            Ok(count)
         }
+
+        self.upvalues[count as usize].index = index;
+        self.upvalues[count as usize].is_local = is_local;
+        let overflow;
+        (function.upvalue_count, overflow) = count.overflowing_add(1);
+        if overflow {
+            return Err(anyhow!("Too many upvalues"));
+        }
+        Ok(count)
     }
 }
 
@@ -278,7 +274,7 @@ struct Parser<'a, T: Iterator<Item = Parsed<Token<'a>>>> {
     current_compiler: NonNull<Compiler<'a>>,
     current_class: Option<NonNull<ClassCompiler>>,
     tokens: Peekable<T>,
-    heap: &'a mut Heap,
+    vm: *mut Vm,
 }
 
 // Can probably do everything with peek() instead of keeping the previous token, but we'll find out
@@ -298,15 +294,15 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     #[inline]
     fn end_scope(&mut self) -> Result<()> {
         unsafe {
-            let mut compiler = self.current_compiler.as_ptr();
+            let compiler = self.current_compiler.as_ptr();
 
             (*compiler).scope_depth -= 1;
 
             while (*compiler).local_count > 0
-                && (*compiler).locals[(*compiler).local_count() - 1].depth
+                && (*compiler).locals[(*compiler).local_count - 1].depth
                     > (*compiler).scope_depth as isize
             {
-                if (*compiler).locals[(*compiler).local_count() - 1].is_captured {
+                if (*compiler).locals[(*compiler).local_count - 1].is_captured {
                     self.emit_byte(OpCode::CloseUpvalue);
                 } else {
                     self.emit_byte(OpCode::Pop);
@@ -320,7 +316,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn block(&mut self) -> Result<()> {
         while self.tokens.peek().is_some_and(|p| *p != Token::RightBrace) {
-            self.declaration()?;
+            let _ = self.declaration();
         }
         self.consume_token(TokenType::RightBrace)
     }
@@ -342,7 +338,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
     #[inline]
     fn chunk(&mut self) -> &mut Chunk {
-        unsafe { &mut (*self.current_compiler.as_ptr()).function.chunk }
+        unsafe { &mut (*(*self.current_compiler.as_ptr()).function.as_ptr()).chunk }
     }
 
     fn current(&mut self) -> Option<Result<(usize, Token)>> {
@@ -358,11 +354,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             .expect("should only call previous when there's a token")
             .1
     }
-
-    // fn emit_byte(&mut self, byte: impl Into<u8>, line) {
-    //     self.chunk
-    //         .write(byte, self.prev.expect("only emit bytes from a token").0);
-    // }
 
     fn advance(&mut self) -> Result<()> {
         let parsed = self.tokens.next();
@@ -380,23 +371,29 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
     }
 
-    pub fn parse(&mut self) {
+    pub fn parse(&mut self) -> bool {
+        let mut had_err = false;
         while self.tokens.peek().is_some() {
-            if let Err(e) = self.declaration() {
-                self.synchronize();
-                println!("{e}");
+            //self.collect_garbage();
+            if self.declaration().err().is_some() && !had_err {
+                had_err = true;
             }
         }
-
-        self.emit_return();
+        !had_err
     }
 
     fn synchronize(&mut self) {
-        while let Some((_, t)) = self.prev {
-            if self.prev.unwrap().1 == Token::Semicolon {
+        while self.tokens.peek().is_some() {
+            if self.previous() == Token::Semicolon {
                 return;
             }
-            match t {
+            match self
+                .tokens
+                .peek()
+                .map(|r| r.1.as_ref())
+                .unwrap()
+                .unwrap_or(&Token::Nil)
+            {
                 Token::Class
                 | Token::Fun
                 | Token::For
@@ -405,25 +402,26 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 | Token::Return
                 | Token::Var
                 | Token::While => return,
-                _ => {
-                    let _ = self.advance();
-                }
+                _ => {}
             }
-            self.advance();
+            let _ = self.advance();
         }
     }
 
-    fn add_constant(&mut self, value: Value) -> u8 {
+    fn add_constant(&mut self, value: Value) -> Result<u8> {
         unsafe {
-            (*self.current_compiler.as_ptr())
-                .function
+            let constant = (*(*self.current_compiler.as_ptr()).function.as_ptr())
                 .chunk
-                .add_constant(value)
+                .add_constant(value);
+            if constant > 255 {
+                return Err(anyhow!("too many constants in one chunk."));
+            }
+            Ok(constant as u8)
         }
     }
 
     fn declaration(&mut self) -> Result<()> {
-        if self.match_token(Class)? {
+        let dec = if self.match_token(Class)? {
             self.class_dec()
         } else if self.match_token(Fun)? {
             self.fun_dec()
@@ -431,22 +429,26 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             self.var_dec()
         } else {
             self.statement()
-        }
+        };
+
+        dec.map_err(|e| {
+            println!("{e}");
+            self.synchronize();
+            e
+        })
     }
 
     fn class_dec(&mut self) -> Result<()> {
-        self.consume_token(Identifier);
+        self.consume_token(Identifier)?;
         let (l, Token::Identifier(name_str)) = self.prev.unwrap() else {
             unreachable!()
         };
-        let obj = self.heap.new_obj(ObjString::new(name_str.to_string()));
-        let name = self.add_constant(Value::Obj(obj));
+        let obj = self.new_obj(ObjString::new(name_str.to_string()));
+        let name = self.add_constant(Value::from(obj))?;
         self.declare_variable()?;
         self.emit_byte(OpCode::Class);
         self.emit_byte(name);
         self.define_variable(name)?;
-
-        let current_class = self.current_class;
 
         let mut class_compiler = ClassCompiler {
             enclosing: self.current_class,
@@ -459,8 +461,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             self.variable(false)?;
             // Store superclass
             self.begin_scope();
-            self.add_local("super");
-            self.define_variable(0);
+            self.add_local("super")?;
+            self.define_variable(0)?;
             self.named_variable(name_str, l, false)?;
             self.emit_byte(OpCode::Inherit);
             unsafe {
@@ -469,17 +471,20 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
 
         self.named_variable(name_str, l, false)?;
-        self.consume_token(LeftBrace);
+        self.consume_token(LeftBrace)?;
 
         // method declarations
         while self.tokens.peek().is_some_and(|t| *t != RightBrace) {
             self.method()?;
         }
 
-        self.consume_token(RightBrace);
+        self.consume_token(RightBrace)?;
         self.emit_byte(OpCode::Pop);
-        if self.current_class.is_some_and(|c| unsafe { (*c.as_ptr()).has_superclass }) {
-            self.end_scope();
+        if self
+            .current_class
+            .is_some_and(|c| unsafe { (*c.as_ptr()).has_superclass })
+        {
+            self.end_scope()?;
         }
         self.current_class = unsafe { (*self.current_class.unwrap().as_ptr()).enclosing };
         Ok(())
@@ -494,8 +499,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             "init" => FunctionType::Initializer,
             _ => FunctionType::Method,
         };
-        let obj = self.heap.new_obj(ObjString::new(name.to_string()));
-        let constant = self.add_constant(Value::Obj(obj));
+        let obj = self.new_obj(ObjString::new(name.to_string()));
+        let constant = self.add_constant(Value::from(obj))?;
         self.function(fun_type)?;
         self.emit_byte(OpCode::Method);
         self.emit_byte(constant);
@@ -507,8 +512,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let Token::Identifier(n) = self.prev.unwrap().1 else {
             unreachable!()
         };
-        let obj = self.heap.new_obj(ObjString::new(n.to_string()));
-        let name = self.add_constant(Value::Obj(obj));
+        let obj = self.new_obj(ObjString::new(n.to_string()));
+        let name = self.add_constant(Value::from(obj))?;
         if can_assign && self.match_token(Equal)? {
             self.expression()?;
             self.emit_byte(OpCode::SetProperty);
@@ -525,14 +530,14 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn this(&mut self, can_assign: bool) -> Result<()> {
+    fn this(&mut self, _: bool) -> Result<()> {
         self.current_class
             .ok_or(anyhow!("can't use 'this' outside of a class."))?;
         self.variable(false)
     }
 
     fn emit_return(&mut self) {
-        let line = *self.chunk().lines().last().unwrap_or(&1);
+        let line = self.prev.map(|p| p.0).unwrap_or(usize::MAX);
         if self.check_function_type(FunctionType::Initializer) {
             self.chunk().write(OpCode::GetLocal, line);
             self.chunk().write(0, line);
@@ -544,10 +549,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn fun_dec(&mut self) -> Result<()> {
         unsafe {
-            let (global, line) = self.parse_variable()?;
-            let mut compiler = unsafe { self.current_compiler.as_ptr() };
+            let (global, _) = self.parse_variable()?;
+            let compiler = self.current_compiler.as_ptr();
             if (*compiler).scope_depth != 0 {
-                (*compiler).locals[(*compiler).local_count() - 1].depth =
+                (*compiler).locals[(*compiler).local_count - 1].depth =
                     (*compiler).scope_depth as isize;
             }
             self.function(FunctionType::Function)?;
@@ -559,13 +564,13 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn inc_arity(&mut self) -> Result<()> {
         unsafe {
             let overflow;
-            let function = &mut (*self.current_compiler.as_ptr()).function;
-            (function.arity, overflow) = function.arity.overflowing_add(1);
+            let function = (*self.current_compiler.as_ptr()).function.as_ptr();
+            ((*function).arity, overflow) = (*function).arity.overflowing_add(1);
             if overflow {
                 return Err(anyhow!("Can't have more than 255 parameters."));
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     fn check_function_type(&mut self, fun_type: FunctionType) -> bool {
@@ -577,8 +582,11 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let Some((_, Token::Identifier(name))) = self.prev else {
             unreachable!()
         };
-        let mut compiler = Compiler::new(Some(name), Some(enclosing), fun_type, &mut self.heap);
-        self.current_compiler = NonNull::new(&mut compiler as *mut Compiler).unwrap();
+        let function = self
+            .new_obj(ObjFunction::new(Some(String::from(name))))
+            .cast();
+        let mut compiler = Compiler::new(function, Some(enclosing), fun_type);
+        self.current_compiler = NonNull::new(addr_of_mut!(compiler)).unwrap();
 
         self.begin_scope();
         self.consume_token(LeftParen)?;
@@ -598,15 +606,13 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.block()?;
         self.emit_return();
 
-        self.emit_return();
         unsafe {
             // end compiler
-            self.current_compiler = (*self.current_compiler.as_ptr()).enclosing.unwrap();
-            let function = self.heap.new_obj(*compiler.function);
-            let constant = self.chunk().add_constant(Value::Obj(function.cast()));
+            self.current_compiler = enclosing;
+            let constant = self.add_constant(Value::from(function.cast()))?;
             self.emit_byte(OpCode::Closure);
             self.emit_byte(constant);
-            for i in (0..(*function.as_ptr().cast::<ObjFunction>()).upvalue_count as usize) {
+            for i in 0..(*function.as_ptr()).upvalue_count as usize {
                 self.emit_byte(compiler.upvalues[i].is_local);
                 self.emit_byte(compiler.upvalues[i].index);
             }
@@ -635,8 +641,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         };
 
         self.declare_variable()?;
-        let string = self.heap.new_obj(ObjString::new(s.to_string())).cast();
-        Ok((self.chunk().add_constant(Value::Obj(string)), l))
+        let string = self.new_obj(ObjString::new(s.to_string())).cast();
+        Ok((self.add_constant(Value::from(string))?, l))
     }
 
     fn mark_initialized(&mut self) -> Result<()> {
@@ -644,7 +650,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         if depth != 0 {
             unsafe {
                 let compiler = self.current_compiler.as_mut();
-                compiler.locals[compiler.local_count() - 1].depth = compiler.scope_depth as isize;
+                compiler.locals[compiler.local_count - 1].depth = compiler.scope_depth as isize;
             }
         }
         Ok(())
@@ -658,7 +664,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         match self.prev {
             Some((_, Token::Identifier(name))) => {
                 let compiler = unsafe { self.current_compiler.as_mut() };
-                for i in (0..compiler.local_count()).rev() {
+                for i in (0..compiler.local_count).rev() {
                     let local = compiler.locals[i];
                     if local.depth != -1 && local.depth < compiler.scope_depth as isize {
                         break;
@@ -685,35 +691,36 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn add_local(&mut self, name: &'a str) -> Result<()> {
-        let mut compiler = unsafe { self.current_compiler.as_mut() };
-        if compiler.local_count() == Compiler::MAX_LOCALS {
-            return Err(anyhow!("Too many local variables"));
+        let compiler = unsafe { self.current_compiler.as_mut() };
+        if compiler.local_count == Compiler::MAX_LOCALS {
+            return Err(anyhow!("Too many local variables."));
         }
-        compiler.locals[compiler.local_count()] = Local::new(name, -1, false);
+        compiler.locals[compiler.local_count] = Local::new(name, -1, false);
         compiler.local_count += 1;
         Ok(())
     }
 
     fn resolve_local(&mut self, compiler: NonNull<Compiler>, name: &str) -> Result<Option<u8>> {
-        let compiler = unsafe { compiler.as_ref() };
-        for i in (0..compiler.local_count()).rev() {
-            let local = compiler.locals[i];
-            if local.name == name {
-                if local.depth == -1 {
-                    return Err(anyhow!(
-                        "Can't read local variable {name} in its own initializer."
-                    ));
+        unsafe {
+            let compiler = compiler.as_ptr();
+            for i in (0..(*compiler).local_count).rev() {
+                let local = (*compiler).locals[i];
+                if local.name == name {
+                    if local.depth == -1 {
+                        return Err(anyhow!(
+                            "Can't read local variable {name} in its own initializer."
+                        ));
+                    }
+                    return Ok(Some(i as u8));
                 }
-                return Ok(Some(i as u8));
             }
+            Ok(None)
         }
-        Ok(None)
     }
 
     fn resolve_upvalue(&mut self, compiler: NonNull<Compiler>, name: &str) -> Result<Option<u8>> {
         unsafe {
             let compiler = compiler.as_ptr();
-            let fun_name = (*compiler).function.name.unwrap_or("");
             if let Some(enclosing) = (*compiler).enclosing {
                 if let Some(local) = self.resolve_local(enclosing, name)? {
                     let l = &mut (*enclosing.as_ptr()).locals[local as usize];
@@ -729,10 +736,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
     }
 
-    fn super_(&mut self, can_assign: bool) -> Result<()> {
+    fn super_(&mut self, _: bool) -> Result<()> {
         if self.current_class.is_none() {
             return Err(anyhow!("Can't use 'super' outside of a class."));
-        } else if let Some(curr) = self.current_class 
+        } else if let Some(curr) = self.current_class
         && unsafe { !(*curr.as_ptr()).has_superclass } {
             return Err(anyhow!("Can't use 'super' in a class with no superclass."));
         }
@@ -741,9 +748,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let (line, Token::Identifier(name)) = self.prev.unwrap() else {
             unreachable!()
         };
-        let obj = self.heap.new_obj(ObjString::new(name.to_string()));
-        let name = self.add_constant(Value::Obj(obj));
-        self.named_variable("this", line, false);
+        let obj = self.new_obj(ObjString::new(name.to_string()));
+        let name = self.add_constant(Value::from(obj))?;
+        self.named_variable("this", line, false)?;
         if self.match_token(LeftParen)? {
             let arg_count = self.argument_list()?;
             self.named_variable("super", line, false)?;
@@ -751,7 +758,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             self.emit_byte(name);
             self.emit_byte(arg_count);
         } else {
-            self.named_variable("super", line, false);
+            self.named_variable("super", line, false)?;
             self.emit_byte(OpCode::GetSuper);
             self.emit_byte(name);
         }
@@ -778,9 +785,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
             } else if let Some(i) = self.resolve_upvalue(self.current_compiler, name)? {
                 (i, OpCode::GetUpvalue, OpCode::SetUpvalue)
             } else {
-                let obj = self.heap.new_obj(ObjString::new(name.to_string()));
+                let obj = self.new_obj(ObjString::new(name.to_string()));
                 (
-                    self.chunk().add_constant(Value::Obj(obj)),
+                    self.add_constant(Value::from(obj))?,
                     OpCode::GetGlobal,
                     OpCode::SetGlobal,
                 )
@@ -810,7 +817,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         if offset > u16::MAX as usize {
             return Err(anyhow!("loop body too large."));
         }
-        //let [lo, hi] = (offset as u16).to_le_bytes();
+
         let hi = ((offset >> 8) & 0xff) as u8;
         let lo = (offset & 0xff) as u8;
         self.chunk().write(hi, line);
@@ -832,7 +839,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn and(&mut self, can_assign: bool) -> Result<()> {
+    fn and(&mut self, _: bool) -> Result<()> {
         let line = self.prev.unwrap().0;
         let end_jump = self.emit_jump(OpCode::JumpIfFalse, line);
         self.chunk().write(OpCode::Pop, line);
@@ -840,7 +847,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.patch_jump(end_jump as usize)
     }
 
-    fn or(&mut self, can_assign: bool) -> Result<()> {
+    fn or(&mut self, _: bool) -> Result<()> {
         let line = self.prev.unwrap().0;
         let else_jump = self.emit_jump(OpCode::JumpIfFalse, line);
         let end_jump = self.emit_jump(OpCode::Jump, line);
@@ -852,7 +859,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.patch_jump(end_jump as usize)
     }
 
-    fn expression_stmt(&mut self, line: usize) -> Result<()> {
+    fn expression_stmt(&mut self) -> Result<()> {
+        let line = self.prev.map(|(l, _)| l).unwrap_or(1);
         self.expression()?;
         self.consume_token(TokenType::Semicolon)?;
         self.chunk().write(OpCode::Pop, line);
@@ -866,131 +874,136 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn statement(&mut self) -> Result<()> {
         // TODO: fix error propagation
-        let Some(Ok((line, token))) = self.current() else {
-            return Ok(());
-        };
-        match token {
-            Token::LeftBrace => {
-                self.advance()?;
-                self.begin_scope();
-                self.block()?;
-                self.end_scope();
+        if self.match_token(LeftBrace)? {
+            self.begin_scope();
+            if let Err(e) = self.block() {
+                println!("{e}");
             }
-            Token::For => {
-                self.begin_scope();
-                self.advance()?;
-                self.consume_token(TokenType::LeftParen)?;
+            self.end_scope()
+        } else if self.match_token(For)? {
+            self.for_stmt()
+        } else if self.match_token(If)? {
+            self.if_stmt()
+        } else if self.match_token(Print)? {
+            self.expression()?;
+            self.consume_token(TokenType::Semicolon)?;
+            self.emit_byte(OpCode::Print);
+            Ok(())
+        } else if self.match_token(Return)? {
+            self.return_stmt()
+        } else if self.match_token(While)? {
+            self.while_stmt()
+        } else {
+            self.expression_stmt()
+        }
+    }
 
-                if self.match_token(TokenType::Semicolon)? {
-                    // No initializer
-                } else if self.match_token(TokenType::Var)? {
-                    self.var_dec()?;
-                } else {
-                    self.expression_stmt(self.prev.unwrap().0)?;
-                }
+    fn for_stmt(&mut self) -> Result<()> {
+        self.begin_scope();
+        self.consume_token(TokenType::LeftParen)?;
+        if self.match_token(TokenType::Semicolon)? {
+            // No initializer
+        } else if self.match_token(TokenType::Var)? {
+            self.var_dec()?;
+        } else {
+            self.expression_stmt()?;
+        }
 
-                let mut loop_start = self.chunk().code().len();
-                let mut exit_jump = -1;
-                if !self.match_token(TokenType::Semicolon)? {
-                    self.expression()?;
-                    self.consume_token(TokenType::Semicolon)?;
+        let mut loop_start = self.chunk().code().len();
+        let mut exit_jump = -1;
+        if !self.match_token(TokenType::Semicolon)? {
+            self.expression()?;
+            self.consume_token(TokenType::Semicolon)?;
 
-                    let line = self.prev.unwrap().0;
-                    exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                    self.chunk().write(OpCode::Pop, line);
-                }
+            let line = self.prev.unwrap().0;
+            exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
+            self.chunk().write(OpCode::Pop, line);
+        }
 
-                if !self.match_token(TokenType::RightParen)? {
-                    let body_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
-                    let inc_start = self.chunk().code().len();
-                    self.expression()?;
-                    self.emit_byte(OpCode::Pop);
-                    self.consume_token(TokenType::RightParen)?;
+        if !self.match_token(TokenType::RightParen)? {
+            let body_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
+            let inc_start = self.chunk().code().len();
+            self.expression()?;
+            self.emit_byte(OpCode::Pop);
+            self.consume_token(TokenType::RightParen)?;
 
-                    self.emit_loop(loop_start)?;
-                    loop_start = inc_start;
-                    self.patch_jump(body_jump as usize)?;
-                }
+            self.emit_loop(loop_start)?;
+            loop_start = inc_start;
+            self.patch_jump(body_jump as usize)?;
+        }
+        self.statement()?;
+        self.emit_loop(loop_start)?;
+        if exit_jump != -1 {
+            self.patch_jump(exit_jump as usize)?;
+            self.emit_byte(OpCode::Pop);
+        }
+        self.end_scope()
+    }
 
-                self.statement()?;
-                self.emit_loop(loop_start)?;
+    fn if_stmt(&mut self) -> Result<()> {
+        self.consume_token(TokenType::LeftParen)?;
+        self.expression()?;
+        self.consume_token(TokenType::RightParen)?;
 
-                if exit_jump != -1 {
-                    self.patch_jump(exit_jump as usize)?;
-                    self.emit_byte(OpCode::Pop);
-                }
-                self.end_scope();
+        let then_jump = self.emit_jump(OpCode::JumpIfFalse, self.prev.unwrap().0);
+        self.emit_byte(OpCode::Pop);
+
+        self.statement()?;
+
+        let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
+        self.patch_jump(then_jump as usize)?;
+        self.emit_byte(OpCode::Pop);
+        if self.match_token(TokenType::Else)? {
+            // Does this get else-if for free? I think it might
+            self.statement()?;
+        }
+        self.patch_jump(else_jump as usize)
+    }
+
+    fn return_stmt(&mut self) -> Result<()> {
+        unsafe {
+            if (*self.current_compiler.as_ptr()).fun_type == FunctionType::Script {
+                return Err(anyhow!("can't return from top-level code"));
             }
-            Token::If => {
-                self.advance()?;
-                self.consume_token(TokenType::LeftParen)?;
-                self.expression()?;
-                self.consume_token(TokenType::RightParen)?;
-
-                let then_jump = self.emit_jump(OpCode::JumpIfFalse, self.prev.unwrap().0);
-                self.emit_byte(OpCode::Pop);
-
-                self.statement()?;
-
-                let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
-                self.patch_jump(then_jump as usize)?;
-                self.emit_byte(OpCode::Pop);
-                if self.match_token(TokenType::Else)? {
-                    // Does this get else-if for free? I think it might
-                    self.statement()?;
-                }
-                self.patch_jump(else_jump as usize)?;
+        }
+        if self.match_token(Semicolon)? {
+            self.emit_return();
+        } else {
+            if self.check_function_type(FunctionType::Initializer) {
+                return Err(anyhow!("Can't return a value from an initializer."));
             }
-            Token::Print => {
-                self.advance()?;
-                self.expression()?;
-                self.consume_token(TokenType::Semicolon)?;
-                self.chunk().write(OpCode::Print, line);
-            }
-            Token::Return => {
-                self.advance()?;
-                if self.match_token(Semicolon)? {
-                    self.emit_return();
-                } else {
-                    if self.check_function_type(FunctionType::Initializer) {
-                        return Err(anyhow!("Can't return a value from an initializer."));
-                    }
-                    self.expression()?;
-                    self.consume_token(Semicolon)?;
-                    self.emit_byte(OpCode::Return);
-                }
-            }
-            Token::While => {
-                self.advance()?;
-                let loop_start = self.chunk().code().len();
-                self.consume_token(TokenType::LeftParen)?;
-                self.expression()?;
-                self.consume_token(TokenType::RightParen)?;
-                let line = self.prev.unwrap().0;
-
-                let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                self.chunk().write(OpCode::Pop, line);
-                self.statement()?;
-                self.emit_loop(loop_start)?;
-
-                self.patch_jump(exit_jump as usize)?;
-                self.emit_byte(OpCode::Pop);
-            }
-            _ => self.expression_stmt(line)?,
+            self.expression()?;
+            self.consume_token(Semicolon)?;
+            self.emit_byte(OpCode::Return);
         }
         Ok(())
     }
 
-    fn string(&mut self, can_assign: bool) -> Result<()> {
-        let (line, token) = self
-            .prev
-            .expect("should only call string when there is a token");
+    fn while_stmt(&mut self) -> Result<()> {
+        let loop_start = self.chunk().code().len();
+        self.consume_token(TokenType::LeftParen)?;
+        self.expression()?;
+        self.consume_token(TokenType::RightParen)?;
+        let line = self.prev.unwrap().0;
+
+        let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
+        self.chunk().write(OpCode::Pop, line);
+        self.statement()?;
+        self.emit_loop(loop_start)?;
+
+        self.patch_jump(exit_jump as usize)?;
+        self.emit_byte(OpCode::Pop);
+        Ok(())
+    }
+
+    fn string(&mut self, _can_assign: bool) -> Result<()> {
+        let token = self.previous();
         match token {
             Token::String(s) => {
-                let obj = self.heap.new_obj(ObjString::new(s.to_string())).cast();
-                let constant = self.chunk().add_constant(Value::Obj(obj));
-                self.chunk().write(OpCode::Constant, line);
-                self.chunk().write(constant, line);
+                let obj = self.new_obj(ObjString::new(s.to_string()));
+                let constant = self.add_constant(Value::from(obj))?;
+                self.emit_byte(OpCode::Constant);
+                self.emit_byte(constant);
                 Ok(())
             }
             _ => unreachable!(),
@@ -1026,7 +1039,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(arg_count)
     }
 
-    fn unary(&mut self, can_assign: bool) -> Result<()> {
+    fn unary(&mut self, _: bool) -> Result<()> {
         let (line, token) = self
             .prev
             .expect("should only call unary when there is a token");
@@ -1040,7 +1053,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn binary(&mut self, can_assign: bool) -> Result<()> {
+    fn binary(&mut self, _: bool) -> Result<()> {
         let (line, token) = self
             .prev
             .expect("should only call binary when there is a token");
@@ -1064,17 +1077,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn number(&mut self, can_assign: bool) -> Result<()> {
+    fn number(&mut self, _: bool) -> Result<()> {
         let (line, Token::Number(n)) = self.prev.expect("only call on numbers") else {
             unreachable!()
         };
         self.chunk().write(OpCode::Constant, line);
-        let constant = self.chunk().add_constant(Value::Number(n));
+        let constant = self.add_constant(Value::from(n))?;
         self.chunk().write(constant, line);
         Ok(())
     }
 
-    fn literal(&mut self, can_assign: bool) -> Result<()> {
+    fn literal(&mut self, _: bool) -> Result<()> {
         match self.prev {
             Some((i, Token::False)) => self.chunk().write(OpCode::False, i),
             Some((i, Token::Nil)) => self.chunk().write(OpCode::Nil, i),
@@ -1084,7 +1097,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         Ok(())
     }
 
-    fn grouping(&mut self, can_assign: bool) -> Result<()> {
+    fn grouping(&mut self, _: bool) -> Result<()> {
         self.expression()?;
         self.consume_token(TokenType::RightParen)?;
         Ok(())
@@ -1118,32 +1131,48 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
         Ok(())
     }
+
+    // TODO: Mark compiler roots
+    fn new_obj<U: IsObj>(&mut self, obj: U) -> NonNull<Obj> {
+        if GLOBAL.stats().bytes_reallocated > NEXT_GC.load(std::sync::atomic::Ordering::Relaxed) {
+            self.collect_garbage();
+        }
+        unsafe { (*self.vm).new_obj(obj) }
+    }
+
+    pub fn collect_garbage(&mut self) {
+        unsafe {
+            //println!("collecting garbage from {}", (*(*self.current_compiler.as_ptr()).function.as_ptr()).name.unwrap_or("script"));
+            let vm = self.vm;
+            (*vm).mark_roots();
+            (*vm).heap.mark_compiler_roots(self.current_compiler);
+            (*vm).heap.trace_references();
+            (*vm).heap.sweep();
+        }
+    }
 }
 
-pub fn compile<'a>(source: &'a str, heap: &mut Heap) -> Result<NonNull<ObjFunction<'a>>> {
+pub fn compile(source: &str, vm: *mut Vm) -> Option<NonNull<ObjFunction>> {
     // for token in scan(source) {
     //     println!("Token: {token}");
     // }
-    let mut compiler = Compiler::new(None, None, FunctionType::Script, heap);
+    unsafe {
+        let function = (*vm).new_obj(ObjFunction::new(None)).cast();
+        let mut compiler = Compiler::new(function, None, FunctionType::Script);
+        compiler.locals[0] = Local::new("", 0, false);
 
-    compiler.locals[0] = Local::new("", 0, false);
-    let mut parser = Parser {
-        prev: None,
-        current_compiler: NonNull::new(&mut compiler as *mut Compiler).unwrap(),
-        current_class: None,
-        tokens: scan(source),
-        heap,
-    };
+        let mut parser = Parser {
+            prev: None,
+            current_compiler: NonNull::new(addr_of_mut!(compiler)).unwrap(), //new(&mut compiler as *mut Compiler).unwrap(),
+            current_class: None,
+            tokens: scan(source),
+            vm,
+        };
 
-    while parser.tokens.peek().is_some() {
-        if let Err(e) = parser.declaration() {
-            parser.synchronize();
-            println!("{e}");
+        if parser.parse() {
+            Some(compiler.function)
+        } else {
+            None
         }
     }
-
-    parser.emit_return();
-    drop(parser);
-    let function = heap.new_obj(*compiler.function).cast();
-    return Ok(function);
 }
