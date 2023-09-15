@@ -13,7 +13,7 @@ use anyhow::Result;
 use prehash::Prehashed;
 
 use super::{
-    debug::RuntimeError,
+    RuntimeError,
     object::{
         Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjString, ObjType,
     },
@@ -150,32 +150,6 @@ where
         value.map(|v| v.into()).unwrap_or(Self::Nil)
     }
 }
-
-// impl DataSize for Value {
-//     const IS_DYNAMIC: bool = true;
-
-//     const STATIC_HEAP_SIZE: usize = 0;
-
-//     fn estimate_heap_size(&self) -> usize {
-//         unsafe {
-//             self.as_obj()
-//                 .map(|o| {
-//                     let o = o.as_ptr();
-//                     match (*o).kind {
-//                         ObjType::BoundMethod => (*o.cast::<ObjBoundMethod>()).estimate_heap_size(),
-//                         ObjType::Class => (*o.cast::<ObjClass>()).estimate_heap_size(),
-//                         ObjType::Closure => (*o.cast::<ObjClosure>()).estimate_heap_size(),
-//                         ObjType::Function => (*o.cast::<ObjFunction>()).estimate_heap_size(),
-//                         ObjType::String => (*o.cast::<ObjString>()).estimate_heap_size(),
-//                         ObjType::Native => (*o.cast::<ObjNative>()).estimate_heap_size(),
-//                         ObjType::Upvalue => (*o.cast::<ObjUpvalue>()).estimate_heap_size(),
-//                         ObjType::Instance => (*o.cast::<ObjInstance>()).estimate_heap_size(),
-//                     }
-//                 })
-//                 .unwrap_or(0)
-//         }
-//     }
-// }
 
 impl Eq for Value {}
 

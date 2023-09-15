@@ -247,8 +247,6 @@ impl<'a> Token<'a> {
 
 impl std::fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO: DELET THIS
-        //write!(f, "{:?}: ", std::mem::discriminant(self));
         let s = match self {
             Token::LeftParen => "(",
             Token::RightParen => ")",

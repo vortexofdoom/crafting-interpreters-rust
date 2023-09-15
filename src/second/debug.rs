@@ -1,7 +1,4 @@
-use super::{
-    chunk::{Chunk, OpCode},
-    value::Value,
-};
+use super::chunk::{Chunk, OpCode};
 
 // pub fn disassemble(chunk: &Chunk, name: &str) {
 //     println!("=={name}==");
@@ -11,46 +8,7 @@ use super::{
 //     }
 // }
 
-#[derive(Debug)]
-pub enum RuntimeError {
-    BinaryOpError(&'static str, Value, Value),
-    BadCall,
-    BadIdentifier(Value),
-    BadSubclass,
-    BadSuperclass,
-    InvalidMethodAccess,
-    InvalidOpcode(u8),
-    InvalidPropertyAccess,
-    NegationError(Value),
-    StackOverflow,
-    UndefinedVariable(Value),
-    UndefinedProperty(Value),
-    WrongNumArguments(u8, u8),
-}
 
-impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BinaryOpError(op, l, r) => write!(f, "Cannot {op} {l} and {r}"),
-            Self::BadCall => write!(f, "can only call functions and classes."),
-            Self::BadIdentifier(val) => write!(f, "{val} is not a valid identifier."),
-            Self::BadSubclass => write!(f, "Subclass must be a class."),
-            Self::BadSuperclass => write!(f, "Superclass must be a class."),
-            Self::InvalidMethodAccess => write!(f, "Only instances have methods."),
-            Self::InvalidOpcode(byte) => write!(f, "Invalid opcode {byte}."),
-            Self::InvalidPropertyAccess => write!(f, "Only instances have properties."),
-            Self::StackOverflow => write!(f, "Stack overflow."),
-            Self::NegationError(val) => write!(f, "Cannot negate {val}"),
-            Self::UndefinedVariable(name) => write!(f, "Undefined variable {name}."),
-            Self::UndefinedProperty(name) => write!(f, "Undefined property {name}."),
-            Self::WrongNumArguments(exp, act) => {
-                write!(f, "expected {exp} arguments, but found {act}.")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RuntimeError {}
 
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
     print!("{offset:04} ");
