@@ -9,11 +9,14 @@ use std::{
 #[cfg(feature = "nan-boxing")]
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use prehash::Prehashed;
 
-use super::object::{
-    Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjString, ObjType,
+use super::{
+    debug::RuntimeError,
+    object::{
+        Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjString, ObjType,
+    },
 };
 
 #[cfg(not(feature = "nan-boxing"))]
@@ -136,7 +139,7 @@ impl Value {
             unsafe {
                 if (*obj.as_ptr()).kind == ObjType::String {
                     let hash = obj.cast::<ObjString>().as_ref().hash;
-                    return Some(Prehashed::new(*self, hash))
+                    return Some(Prehashed::new(*self, hash));
                 }
             }
         }
@@ -274,7 +277,7 @@ impl std::ops::Sub for Value {
     fn sub(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x - y)),
-            _ => Err(anyhow!("cannot subtract {rhs} from {self}")),
+            _ => Err(RuntimeError::BinaryOpError("subtract", self, rhs).into()),
         }
     }
 }
@@ -285,7 +288,7 @@ impl std::ops::Div for Value {
     fn div(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x / y)),
-            _ => Err(anyhow!("cannot divide {self} by {rhs}")),
+            _ => Err(RuntimeError::BinaryOpError("divide", self, rhs).into()),
         }
     }
 }
@@ -296,7 +299,7 @@ impl std::ops::Mul for Value {
     fn mul(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x * y)),
-            _ => Err(anyhow!("cannot multiply {self} by {rhs}")),
+            _ => Err(RuntimeError::BinaryOpError("multiply", self, rhs).into()),
         }
     }
 }
@@ -307,7 +310,7 @@ impl std::ops::Neg for Value {
     fn neg(self) -> Self::Output {
         match self.as_num() {
             Some(n) => Ok(Self::from(-n)),
-            _ => Err(anyhow!("cannot negate {self}")),
+            _ => Err(RuntimeError::NegationError(self).into()),
         }
     }
 }

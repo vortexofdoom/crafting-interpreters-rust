@@ -16,13 +16,13 @@ use std::{
     sync::atomic::Ordering::Relaxed,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{bail, Result};
 use chunk::OpCode;
 use compiler::compile;
-use prehash::{Prehashed, PrehashedMap, new_prehashed_map};
+use prehash::{new_prehashed_map, Prehashed, PrehashedMap};
 
 use crate::{
-    second::{memory::NEXT_GC, object::Upvalue},
+    second::{debug::RuntimeError, memory::NEXT_GC, object::Upvalue},
     GLOBAL,
 };
 
@@ -180,7 +180,7 @@ impl Vm {
     pub fn free_objects(&mut self) {
         self.heap.free_objects();
     }
-    
+
     fn reset(&mut self) {
         self.globals.clear();
         self.frame_count = 0;
@@ -234,8 +234,7 @@ impl Vm {
         unsafe {
             let function = (*closure.as_ptr()).function.as_ptr();
             if (*function).arity != arg_count {
-                return Err(anyhow!(
-                    "Expected {} arguments, but found {}.",
+                bail!(RuntimeError::WrongNumArguments(
                     (*function).arity,
                     arg_count
                 ));
@@ -243,7 +242,7 @@ impl Vm {
 
             if self.frame_count == FRAMES_MAX {
                 // TODO: print stack trace
-                return Err(anyhow!("Stack overflow."));
+                bail!(RuntimeError::StackOverflow);
             }
 
             let frame = CallFrame {
@@ -260,18 +259,14 @@ impl Vm {
 
     fn call_value(&mut self, value: Value, arg_count: u8) -> Result<()> {
         unsafe {
-            let obj = value
-                .as_obj()
-                .ok_or(anyhow!("can only call functions and classes."))?;
+            let obj = value.as_obj().ok_or(RuntimeError::BadCall)?;
             match obj.as_ref().kind {
                 ObjType::Closure => self.call(obj.cast(), arg_count),
                 ObjType::Native => {
                     let native = obj.cast::<ObjNative>().as_ref();
                     let arity = native.arity();
                     if arity != arg_count as usize {
-                        return Err(anyhow!(
-                            "expected {arity} arguments, but found {arg_count}."
-                        ));
+                        bail!(RuntimeError::WrongNumArguments(arity as u8, arg_count));
                     }
                     let args = match arity {
                         0 => None,
@@ -286,10 +281,13 @@ impl Vm {
                     let class = obj.cast::<ObjClass>();
                     let obj = self.new_obj(ObjInstance::new(class));
                     self.stack[self.sp - arg_count as usize - 1].set(Value::from(obj));
-                    if let Some(init) = (*class.as_ptr()).methods.get(&self.init_string.hashed().unwrap()) {
-                        return self.call((*init).as_obj().expect("only call on obj").cast(), arg_count);
+                    if let Some(init) = (*class.as_ptr())
+                        .methods
+                        .get(&self.init_string.hashed().unwrap())
+                    {
+                        return self.call((*init).as_obj().unwrap().cast(), arg_count);
                     } else if arg_count != 0 {
-                        return Err(anyhow!("expected 0 arguments but got {arg_count}"));
+                        bail!(RuntimeError::WrongNumArguments(0, arg_count));
                     }
                     Ok(())
                 }
@@ -298,7 +296,7 @@ impl Vm {
                     self.stack[self.sp - arg_count as usize - 1].set((*bound).receiver);
                     self.call((*bound).method, arg_count)
                 }
-                _ => Err(anyhow!("can only call functions and classes.")),
+                _ => bail!(RuntimeError::BadCall),
             }
         }
     }
@@ -349,9 +347,9 @@ impl Vm {
         unsafe {
             let method = (*class.as_ptr())
                 .methods
-                .get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?)
+                .get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?)
                 .and_then(|v| v.as_obj())
-                .ok_or(anyhow!("runtime error."))?;
+                .ok_or(RuntimeError::UndefinedProperty(name))?;
             let bound = self
                 .heap
                 .new_obj(ObjBoundMethod::new(self.peek(0), method.cast()));
@@ -367,14 +365,14 @@ impl Vm {
             if let Some(o) = receiver.as_obj()
             && (*o.as_ptr()).kind == ObjType::Instance {
                 let instance = o.as_ptr().cast::<ObjInstance>();
-                if let Some(val) = (*instance).fields.get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?) {
+                if let Some(val) = (*instance).fields.get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?) {
                     self.stack[self.sp - arg_count as usize - 1].set(*val);
                     self.call_value(*val, arg_count)
                 } else {
                     self.invoke_from_class((*o.as_ptr().cast::<ObjInstance>()).class, name, arg_count)
                 }
             } else {
-                Err(anyhow!("Only instances have methods."))
+                bail!(RuntimeError::InvalidMethodAccess)
             }
         }
     }
@@ -388,9 +386,9 @@ impl Vm {
         unsafe {
             let method = (*class.as_ptr())
                 .methods
-                .get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?)
+                .get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?)
                 .and_then(|v| v.as_obj())
-                .ok_or(anyhow!("Undefined property {name}."))?;
+                .ok_or(RuntimeError::UndefinedProperty(name))?;
             self.call(method.cast(), arg_count)
         }
     }
@@ -452,7 +450,7 @@ impl Vm {
 
                 let byte = read_byte!();
 
-                match OpCode::try_from(byte).map_err(|_| anyhow!("invalid opcode {byte}"))? {
+                match OpCode::try_from(byte).map_err(|_| RuntimeError::InvalidOpcode(byte))? {
                     OpCode::Constant => {
                         let constant = read_constant!();
                         self.push(constant);
@@ -469,12 +467,14 @@ impl Vm {
                         let name = read_constant!();
                         let hash = name.as_obj().unwrap().cast::<ObjString>().as_ref().hash;
                         let pre_hash = Prehashed::new(name, hash);
-                        if let Some(value) =
-                            self.globals.get(&pre_hash).or_else(|| self.natives.get(&pre_hash))
+                        if let Some(value) = self
+                            .globals
+                            .get(&pre_hash)
+                            .or_else(|| self.natives.get(&pre_hash))
                         {
                             self.push(*value);
                         } else {
-                            return Err(anyhow!("Undefined Global '{}'", name));
+                            bail!(RuntimeError::UndefinedVariable(name));
                         }
                     }
                     OpCode::DefineGlobal => {
@@ -496,7 +496,7 @@ impl Vm {
                         let value = self.peek(0);
                         if self.globals.insert(pre_hash, value).is_none() {
                             self.globals.remove(&pre_hash);
-                            return Err(anyhow!("Undefined Global '{}'", name));
+                            bail!(RuntimeError::UndefinedVariable(name));
                         }
                     }
                     OpCode::GetUpvalue => {
@@ -516,15 +516,22 @@ impl Vm {
                         }
                     }
                     OpCode::GetProperty => {
-                        let instance = self.peek(0).as_obj().ok_or(anyhow!("Only instances have properties.")).and_then(|obj| {
-                            let obj = obj.as_ptr();
-                            match (*obj).kind {
-                                ObjType::Instance => Ok(obj.cast::<ObjInstance>()),
-                                _ => Err(anyhow!("Only instances have properties.")),
-                            }
-                        })?;
+                        let instance = self
+                            .peek(0)
+                            .as_obj()
+                            .and_then(|obj| {
+                                let obj = obj.as_ptr();
+                                match (*obj).kind {
+                                    ObjType::Instance => Some(obj.cast::<ObjInstance>()),
+                                    _ => None,
+                                }
+                            })
+                            .ok_or(RuntimeError::InvalidPropertyAccess)?;
                         let name = read_constant!();
-                        if let Some(val) = (*instance).fields.get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?) {
+                        if let Some(val) = (*instance)
+                            .fields
+                            .get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?)
+                        {
                             self.pop();
                             self.push(*val);
                             continue;
@@ -538,18 +545,21 @@ impl Vm {
                             if (*obj).kind == ObjType::Instance {
                                 let instance = obj.cast::<ObjInstance>();
                                 let name = read_constant!();
-                                (*instance).fields.insert(name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?, self.peek(0));
+                                (*instance).fields.insert(
+                                    name.hashed().ok_or(RuntimeError::BadIdentifier(name))?,
+                                    self.peek(0),
+                                );
                                 let value = self.pop();
                                 self.pop();
                                 self.push(value);
                                 continue;
                             }
                         }
-                        return Err(anyhow!("Undefined property."));
+                        bail!(RuntimeError::InvalidPropertyAccess);
                     }
                     OpCode::GetSuper => {
                         let name = read_constant!();
-                        let superclass = self.pop().as_obj().ok_or(anyhow!("not a class"))?;
+                        let superclass = self.pop().as_obj().ok_or(RuntimeError::BadSuperclass)?;
                         self.bind_method(superclass.cast(), name)?;
                     }
                     OpCode::Equal => compare!(==),
@@ -567,7 +577,7 @@ impl Vm {
                             let obj = self.new_obj(ObjString::new(format!("{l}{r}")));
                             Value::from(obj)
                         } else {
-                            return Err(anyhow!("cannot add {l} and {r}"));
+                            bail!(RuntimeError::BinaryOpError("add", l, r));
                         };
                         self.pop();
                         self.pop();
@@ -617,34 +627,38 @@ impl Vm {
                     OpCode::SuperInvoke => {
                         let method = read_constant!();
                         let arg_count = read_byte!();
-                        let superclass = self.pop().as_obj().ok_or(anyhow!("Not a class"))?;
+                        let superclass = self.pop().as_obj().ok_or(RuntimeError::BadSuperclass)?;
                         self.frames[self.frame_count - 1] = frame;
                         self.invoke_from_class(superclass.cast(), method, arg_count)?;
                         frame = self.frames[self.frame_count - 1];
                     }
                     OpCode::Closure => {
-                        read_constant!().as_obj().ok_or(anyhow!("Not a closure")).map(|o| {
-                            let closure = self
-                                .heap
-                                .new_obj(ObjClosure::new(o.cast()))
-                                .cast::<ObjClosure>();
-                            self.push(Value::from(closure.cast()));
-                            let capacity = (*closure.as_ptr()).upvalues.capacity();
-                            for _ in 0..capacity {
-                                let is_local = read_byte!() == 1;
-                                let index = read_byte!() as usize;
-                                if is_local {
-                                    let upvalue = self.capture_upvalue(frame.starting_slot + index);
-                                    (*closure.as_ptr())
-                                        .upvalues
-                                        .push(NonNull::new(upvalue).unwrap());
-                                } else {
-                                    (*closure.as_ptr())
-                                        .upvalues
-                                        .push((*frame.closure).upvalues[index]);
+                        let name = read_constant!();
+                        name.as_obj()
+                            .ok_or(RuntimeError::BadIdentifier(name))
+                            .map(|o| {
+                                let closure = self
+                                    .heap
+                                    .new_obj(ObjClosure::new(o.cast()))
+                                    .cast::<ObjClosure>();
+                                self.push(Value::from(closure.cast()));
+                                let capacity = (*closure.as_ptr()).upvalues.capacity();
+                                for _ in 0..capacity {
+                                    let is_local = read_byte!() == 1;
+                                    let index = read_byte!() as usize;
+                                    if is_local {
+                                        let upvalue =
+                                            self.capture_upvalue(frame.starting_slot + index);
+                                        (*closure.as_ptr())
+                                            .upvalues
+                                            .push(NonNull::new(upvalue).unwrap());
+                                    } else {
+                                        (*closure.as_ptr())
+                                            .upvalues
+                                            .push((*frame.closure).upvalues[index]);
+                                    }
                                 }
-                            }
-                        })?;
+                            })?;
                     }
                     OpCode::CloseUpvalue => {
                         let last = self.sp - 1;
@@ -665,33 +679,36 @@ impl Vm {
                         frame = self.frames[self.frame_count - 1];
                     }
                     OpCode::Class => {
-                        let name = read_constant!().as_obj().ok_or(anyhow!("Not a string"))?.cast();
+                        let name = read_constant!();
+                        let name = name
+                            .as_obj()
+                            .ok_or(RuntimeError::BadIdentifier(name))?
+                            .cast();
                         let class = self.new_obj(ObjClass::new(name));
                         self.push(Value::from(class));
                     }
                     OpCode::Inherit => {
                         let superclass = self.peek(1);
                         let subclass = self.peek(0);
-                        let sup = superclass
-                            .as_obj()
-                            .ok_or(anyhow!("Superclass must be a class."))?;
-                        let sub = subclass
-                            .as_obj()
-                            .ok_or(anyhow!("Subclass must be a class."))?;
+                        let sup = superclass.as_obj().ok_or(RuntimeError::BadSuperclass)?;
+                        let sub = subclass.as_obj().ok_or(RuntimeError::BadSubclass)?;
                         match (*sup.as_ptr()).kind {
                             ObjType::Class => {
                                 let (sup, sub) = (sup.cast::<ObjClass>(), sub.cast::<ObjClass>());
                                 (*sub.as_ptr()).methods = (*sup.as_ptr()).methods.clone();
                                 self.pop();
                             }
-                            _ => return Err(anyhow!("Superclass must be a class.")),
+                            _ => bail!(RuntimeError::BadSuperclass),
                         }
                     }
                     OpCode::Method => {
                         let name = read_constant!();
                         let method = self.peek(0);
-                        let class = self.peek(1).as_obj().ok_or(anyhow!("Not a class"))?.cast::<ObjClass>().as_ptr();
-                        (*class).methods.insert(name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?, method);
+                        let class = self.peek(1).as_obj().unwrap().cast::<ObjClass>().as_ptr();
+                        (*class).methods.insert(
+                            name.hashed().ok_or(RuntimeError::BadIdentifier(name))?,
+                            method,
+                        );
                         self.pop();
                     }
                 }

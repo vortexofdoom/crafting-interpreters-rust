@@ -376,7 +376,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             }
                             _ => return pack!(Ok($c2)),
                         }
-                    }}
+                    }};
                 }
                 match c {
                     '"' => {

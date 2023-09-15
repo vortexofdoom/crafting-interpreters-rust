@@ -1,7 +1,7 @@
 use std::{cell::Cell, ptr::NonNull};
 
 use fnv::FnvHasher;
-use prehash::{Prehashed, PrehashedMap, new_prehashed_map};
+use prehash::{new_prehashed_map, Prehashed, PrehashedMap};
 
 use super::{chunk::Chunk, value::Value};
 
