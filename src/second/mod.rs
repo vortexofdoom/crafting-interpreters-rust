@@ -75,7 +75,7 @@ impl Vm {
         let mut vm = Self {
             frames: [CallFrame::default(); FRAMES_MAX],
             frame_count: 0,
-            stack: std::array::from_fn(|_| Cell::new(Value::NIL)),
+            stack: std::array::from_fn(|_| Cell::new(Value::Nil)),
             sp: 0,
             globals: new_prehashed_map(),
             natives: new_prehashed_map(),
@@ -455,7 +455,7 @@ impl Vm {
                         let constant = read_constant!();
                         self.push(constant);
                     }
-                    OpCode::Nil => self.push(Value::NIL),
+                    OpCode::Nil => self.push(Value::Nil),
                     OpCode::True => self.push(Value::from(true)),
                     OpCode::False => self.push(Value::from(false)),
                     OpCode::Pop => _ = self.pop(),

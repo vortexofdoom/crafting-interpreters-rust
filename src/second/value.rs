@@ -28,12 +28,6 @@ pub enum Value {
     Nil,
 }
 
-#[cfg(not(feature = "nan-boxing"))]
-impl Value {
-    // Just a constant so that it works with both cfgs
-    pub const NIL: Self = Self::Nil;
-}
-
 #[cfg(feature = "nan-boxing")]
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +35,8 @@ pub struct Value(u64);
 
 #[cfg(feature = "nan-boxing")]
 impl Value {
-    pub const NIL: Self = Self(QNAN | NIL_TAG);
+    #[allow(non_upper_case_globals)]
+    pub const Nil: Self = Self(QNAN | NIL_TAG);
     pub const FALSE: Self = Self(QNAN | FALSE_TAG);
     pub const TRUE: Self = Self(QNAN | TRUE_TAG);
 }
@@ -152,7 +147,7 @@ where
     T: Into<Value>,
 {
     fn from(value: Option<T>) -> Self {
-        value.map(|v| v.into()).unwrap_or(Self::NIL)
+        value.map(|v| v.into()).unwrap_or(Self::Nil)
     }
 }
 
@@ -199,7 +194,7 @@ impl Hash for Value {
 
 impl Value {
     pub fn is_truthy(self) -> bool {
-        self.as_bool().unwrap_or(self != Self::NIL)
+        self.as_bool().unwrap_or(self != Self::Nil)
     }
 
     pub fn clock(_: Option<&[Cell<Self>]>) -> Self {
@@ -441,7 +436,7 @@ mod tests {
         assert_eq!(ValueType::from(obj), ValueType::Obj);
         assert_eq!(ValueType::from(bool), ValueType::Bool);
         assert_eq!(ValueType::from(num), ValueType::Number);
-        assert_eq!(ValueType::from(Value::NIL), ValueType::Nil);
+        assert_eq!(ValueType::from(Value::Nil), ValueType::Nil);
         unsafe {
             drop(Box::from_raw(
                 obj.as_obj().unwrap().cast::<ObjString>().as_ptr(),
