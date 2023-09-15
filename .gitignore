@@ -2,5 +2,5 @@
 *.lox
 /.vscode
 perf*
-flamegraph.svg
+*.svg
 *.txt

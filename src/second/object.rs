@@ -1,6 +1,7 @@
 use std::{cell::Cell, ptr::NonNull};
 
-use fnv::FnvHashMap;
+use fnv::FnvHasher;
+use prehash::{Prehashed, PrehashedMap, new_prehashed_map};
 
 use super::{chunk::Chunk, value::Value};
 
@@ -76,6 +77,7 @@ pub struct ObjString {
     pub obj: Obj,
     // This is an extra word in heap memory vs the book's representation,
     // but it comes with ergonomics (and potential optimization later)
+    pub hash: u64,
     string: String,
 }
 
@@ -92,6 +94,7 @@ impl ObjString {
     pub fn new(string: String) -> Self {
         Self {
             obj: Obj::string(),
+            hash: *Prehashed::as_hash(&Prehashed::with_hasher::<FnvHasher>(&string)),
             string,
         }
     }
@@ -254,7 +257,7 @@ impl ObjUpvalue {
 pub struct ObjClass {
     pub obj: Obj,
     pub name: NonNull<ObjString>,
-    pub methods: FnvHashMap<Value, Value>,
+    pub methods: PrehashedMap<Value, Value>,
 }
 
 impl ObjClass {
@@ -262,7 +265,7 @@ impl ObjClass {
         Self {
             obj: Obj::class(),
             name,
-            methods: FnvHashMap::default(),
+            methods: new_prehashed_map(),
         }
     }
 }
@@ -272,7 +275,7 @@ impl ObjClass {
 pub struct ObjInstance {
     pub obj: Obj,
     pub class: NonNull<ObjClass>,
-    pub fields: FnvHashMap<Value, Value>,
+    pub fields: PrehashedMap<Value, Value>,
 }
 
 impl ObjInstance {
@@ -280,7 +283,7 @@ impl ObjInstance {
         Self {
             obj: Obj::instance(),
             class,
-            fields: FnvHashMap::default(),
+            fields: new_prehashed_map(),
         }
     }
 }

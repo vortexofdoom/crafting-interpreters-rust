@@ -3,6 +3,8 @@ use std::{
     sync::atomic::{AtomicIsize, Ordering},
 };
 
+use prehash::Prehashed;
+
 use crate::GLOBAL;
 
 use super::{
@@ -74,7 +76,7 @@ impl Heap {
     }
 
     pub fn mark_value(&mut self, value: Value) {
-        if let Ok(o) = value.as_obj() {
+        if let Some(o) = value.as_obj() {
             self.mark_obj(o);
         }
     }
@@ -109,7 +111,7 @@ impl Heap {
                     let instance = obj.cast::<ObjInstance>();
                     self.mark_obj((*instance).class.cast());
                     for (key, val) in (*instance).fields.iter() {
-                        self.mark_value(*key);
+                        self.mark_value(*Prehashed::as_inner(key));
                         self.mark_value(*val);
                     }
                 }
@@ -122,7 +124,7 @@ impl Heap {
                     let class = obj.cast::<ObjClass>();
                     self.mark_obj((*class).name.cast());
                     for (k, v) in (*class).methods.iter() {
-                        self.mark_value(*k);
+                        self.mark_value(*Prehashed::as_inner(k));
                         self.mark_value(*v)
                     }
                 }

@@ -7,7 +7,7 @@ edition = "2021"
 debug = true
 
 [features]
-#default = ["nan-boxing"]
+default = ["nan-boxing"]
 nan-boxing = []
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -21,3 +21,4 @@ num_enum = "0.7.0"
 enum-map = "2.6.0"
 fnv = "1.0.7"
 stats_alloc = "0.1.10"
+prehash = "1.0.0"

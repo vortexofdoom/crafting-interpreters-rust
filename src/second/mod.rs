@@ -19,7 +19,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use chunk::OpCode;
 use compiler::compile;
-use fnv::FnvHashMap;
+use prehash::{Prehashed, PrehashedMap, new_prehashed_map};
 
 use crate::{
     second::{memory::NEXT_GC, object::Upvalue},
@@ -61,8 +61,8 @@ pub struct Vm {
     frame_count: usize,
     stack: [Cell<Value>; STACK_MAX],
     sp: usize,
-    globals: FnvHashMap<Value, Value>,
-    natives: FnvHashMap<Value, Value>,
+    globals: PrehashedMap<Value, Value>,
+    natives: PrehashedMap<Value, Value>,
     open_upvalues: Option<NonNull<ObjUpvalue>>,
     init_string: Value,
     heap: Heap,
@@ -77,8 +77,8 @@ impl Vm {
             frame_count: 0,
             stack: std::array::from_fn(|_| Cell::new(Value::NIL)),
             sp: 0,
-            globals: FnvHashMap::default(),
-            natives: FnvHashMap::default(),
+            globals: new_prehashed_map(),
+            natives: new_prehashed_map(),
             open_upvalues: None,
             init_string: Value::from(obj),
             heap,
@@ -102,10 +102,12 @@ impl Vm {
         function: fn(Option<&[Cell<Value>]>) -> Value,
     ) {
         let name = self.new_obj(ObjString::new(String::from(name)));
-        self.push(Value::from(name));
+        let hash = unsafe { name.cast::<ObjString>().as_ref().hash };
+        let pre_hash = Prehashed::new(Value::from(name), hash);
+        self.push(Value::from(name.cast()));
         let native = self.new_obj(ObjNative::new(arity, function));
         self.push(Value::from(native));
-        self.natives.insert(Value::from(name), Value::from(native));
+        self.natives.insert(pre_hash, Value::from(native));
         self.pop();
         self.pop();
     }
@@ -154,12 +156,12 @@ impl Vm {
         }
 
         for (name, value) in self.globals.iter() {
-            self.heap.mark_value(*name);
+            self.heap.mark_value(*Prehashed::as_inner(name));
             self.heap.mark_value(*value);
         }
 
         for (name, value) in self.natives.iter() {
-            self.heap.mark_value(*name);
+            self.heap.mark_value(*Prehashed::as_inner(name));
             self.heap.mark_value(*value);
         }
 
@@ -260,7 +262,7 @@ impl Vm {
         unsafe {
             let obj = value
                 .as_obj()
-                .map_err(|_| anyhow!("can only call functions and classes."))?;
+                .ok_or(anyhow!("can only call functions and classes."))?;
             match obj.as_ref().kind {
                 ObjType::Closure => self.call(obj.cast(), arg_count),
                 ObjType::Native => {
@@ -284,8 +286,8 @@ impl Vm {
                     let class = obj.cast::<ObjClass>();
                     let obj = self.new_obj(ObjInstance::new(class));
                     self.stack[self.sp - arg_count as usize - 1].set(Value::from(obj));
-                    if let Some(init) = (*class.as_ptr()).methods.get(&self.init_string) {
-                        return self.call((*init).as_obj()?.cast(), arg_count);
+                    if let Some(init) = (*class.as_ptr()).methods.get(&self.init_string.hashed().unwrap()) {
+                        return self.call((*init).as_obj().expect("only call on obj").cast(), arg_count);
                     } else if arg_count != 0 {
                         return Err(anyhow!("expected 0 arguments but got {arg_count}"));
                     }
@@ -347,9 +349,9 @@ impl Vm {
         unsafe {
             let method = (*class.as_ptr())
                 .methods
-                .get(&name)
-                .ok_or(anyhow!("runtime error."))
-                .and_then(|v| v.as_obj())?;
+                .get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?)
+                .and_then(|v| v.as_obj())
+                .ok_or(anyhow!("runtime error."))?;
             let bound = self
                 .heap
                 .new_obj(ObjBoundMethod::new(self.peek(0), method.cast()));
@@ -362,10 +364,10 @@ impl Vm {
     fn invoke(&mut self, name: Value, arg_count: u8) -> Result<()> {
         let receiver = self.peek(arg_count as usize);
         unsafe {
-            if let Ok(o) = receiver.as_obj()
+            if let Some(o) = receiver.as_obj()
             && (*o.as_ptr()).kind == ObjType::Instance {
                 let instance = o.as_ptr().cast::<ObjInstance>();
-                if let Some(val) = (*instance).fields.get(&name) {
+                if let Some(val) = (*instance).fields.get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?) {
                     self.stack[self.sp - arg_count as usize - 1].set(*val);
                     self.call_value(*val, arg_count)
                 } else {
@@ -386,9 +388,9 @@ impl Vm {
         unsafe {
             let method = (*class.as_ptr())
                 .methods
-                .get(&name)
-                .ok_or(anyhow!("Undefined property {name}."))
-                .and_then(|v| v.as_obj())?;
+                .get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?)
+                .and_then(|v| v.as_obj())
+                .ok_or(anyhow!("Undefined property {name}."))?;
             self.call(method.cast(), arg_count)
         }
     }
@@ -465,18 +467,22 @@ impl Vm {
                     }
                     OpCode::GetGlobal => {
                         let name = read_constant!();
+                        let hash = name.as_obj().unwrap().cast::<ObjString>().as_ref().hash;
+                        let pre_hash = Prehashed::new(name, hash);
                         if let Some(value) =
-                            self.globals.get(&name).or_else(|| self.natives.get(&name))
+                            self.globals.get(&pre_hash).or_else(|| self.natives.get(&pre_hash))
                         {
                             self.push(*value);
                         } else {
-                            return Err(anyhow!("Undefined Global '{name}'"));
+                            return Err(anyhow!("Undefined Global '{}'", name));
                         }
                     }
                     OpCode::DefineGlobal => {
                         let name = read_constant!();
+                        let hash = name.as_obj().unwrap().cast::<ObjString>().as_ref().hash;
+                        let pre_hash = Prehashed::new(name, hash);
                         let value = self.peek(0);
-                        self.globals.insert(name, value);
+                        self.globals.insert(pre_hash, value);
                         self.pop();
                     }
                     OpCode::SetLocal => {
@@ -485,10 +491,12 @@ impl Vm {
                     }
                     OpCode::SetGlobal => {
                         let name = read_constant!();
+                        let hash = name.as_obj().unwrap().cast::<ObjString>().as_ref().hash;
+                        let pre_hash = Prehashed::new(name, hash);
                         let value = self.peek(0);
-                        if self.globals.insert(name, value).is_none() {
-                            self.globals.remove(&name);
-                            return Err(anyhow!("Undefined Global '{name}'"));
+                        if self.globals.insert(pre_hash, value).is_none() {
+                            self.globals.remove(&pre_hash);
+                            return Err(anyhow!("Undefined Global '{}'", name));
                         }
                     }
                     OpCode::GetUpvalue => {
@@ -508,7 +516,7 @@ impl Vm {
                         }
                     }
                     OpCode::GetProperty => {
-                        let instance = self.peek(0).as_obj().and_then(|obj| {
+                        let instance = self.peek(0).as_obj().ok_or(anyhow!("Only instances have properties.")).and_then(|obj| {
                             let obj = obj.as_ptr();
                             match (*obj).kind {
                                 ObjType::Instance => Ok(obj.cast::<ObjInstance>()),
@@ -516,7 +524,7 @@ impl Vm {
                             }
                         })?;
                         let name = read_constant!();
-                        if let Some(val) = (*instance).fields.get(&name) {
+                        if let Some(val) = (*instance).fields.get(&name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?) {
                             self.pop();
                             self.push(*val);
                             continue;
@@ -525,12 +533,12 @@ impl Vm {
                     }
                     OpCode::SetProperty => {
                         let instance = self.peek(1);
-                        if let Ok(obj) = instance.as_obj() {
+                        if let Some(obj) = instance.as_obj() {
                             let obj = obj.as_ptr();
                             if (*obj).kind == ObjType::Instance {
                                 let instance = obj.cast::<ObjInstance>();
                                 let name = read_constant!();
-                                (*instance).fields.insert(name, self.peek(0));
+                                (*instance).fields.insert(name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?, self.peek(0));
                                 let value = self.pop();
                                 self.pop();
                                 self.push(value);
@@ -541,7 +549,7 @@ impl Vm {
                     }
                     OpCode::GetSuper => {
                         let name = read_constant!();
-                        let superclass = self.pop().as_obj()?;
+                        let superclass = self.pop().as_obj().ok_or(anyhow!("not a class"))?;
                         self.bind_method(superclass.cast(), name)?;
                     }
                     OpCode::Equal => compare!(==),
@@ -552,9 +560,9 @@ impl Vm {
                     OpCode::Add => {
                         let r = self.peek(0);
                         let l = self.peek(1);
-                        let result = if let (Ok(x), Ok(y)) = (l.as_num(), r.as_num()) {
+                        let result = if let (Some(x), Some(y)) = (l.as_num(), r.as_num()) {
                             Value::from(x + y)
-                        } else if let (Ok(o), _) | (_, Ok(o)) = (l.as_obj(), r.as_obj())
+                        } else if let (Some(o), _) | (_, Some(o)) = (l.as_obj(), r.as_obj())
                         && (*o.as_ptr()).kind == ObjType::String {
                             let obj = self.new_obj(ObjString::new(format!("{l}{r}")));
                             Value::from(obj)
@@ -609,13 +617,13 @@ impl Vm {
                     OpCode::SuperInvoke => {
                         let method = read_constant!();
                         let arg_count = read_byte!();
-                        let superclass = self.pop().as_obj()?;
+                        let superclass = self.pop().as_obj().ok_or(anyhow!("Not a class"))?;
                         self.frames[self.frame_count - 1] = frame;
                         self.invoke_from_class(superclass.cast(), method, arg_count)?;
                         frame = self.frames[self.frame_count - 1];
                     }
                     OpCode::Closure => {
-                        read_constant!().as_obj().map(|o| {
+                        read_constant!().as_obj().ok_or(anyhow!("Not a closure")).map(|o| {
                             let closure = self
                                 .heap
                                 .new_obj(ObjClosure::new(o.cast()))
@@ -657,7 +665,7 @@ impl Vm {
                         frame = self.frames[self.frame_count - 1];
                     }
                     OpCode::Class => {
-                        let name = read_constant!().as_obj()?.cast();
+                        let name = read_constant!().as_obj().ok_or(anyhow!("Not a string"))?.cast();
                         let class = self.new_obj(ObjClass::new(name));
                         self.push(Value::from(class));
                     }
@@ -666,10 +674,10 @@ impl Vm {
                         let subclass = self.peek(0);
                         let sup = superclass
                             .as_obj()
-                            .map_err(|_| anyhow!("Superclass must be a class."))?;
+                            .ok_or(anyhow!("Superclass must be a class."))?;
                         let sub = subclass
                             .as_obj()
-                            .map_err(|_| anyhow!("Subclass must be a class."))?;
+                            .ok_or(anyhow!("Subclass must be a class."))?;
                         match (*sup.as_ptr()).kind {
                             ObjType::Class => {
                                 let (sup, sub) = (sup.cast::<ObjClass>(), sub.cast::<ObjClass>());
@@ -682,8 +690,8 @@ impl Vm {
                     OpCode::Method => {
                         let name = read_constant!();
                         let method = self.peek(0);
-                        let class = self.peek(1).as_obj()?.cast::<ObjClass>().as_ptr();
-                        (*class).methods.insert(name, method);
+                        let class = self.peek(1).as_obj().ok_or(anyhow!("Not a class"))?.cast::<ObjClass>().as_ptr();
+                        (*class).methods.insert(name.hashed().ok_or(anyhow!("Not a valid Lox String object!"))?, method);
                         self.pop();
                     }
                 }

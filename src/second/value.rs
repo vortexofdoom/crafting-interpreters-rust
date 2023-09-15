@@ -10,6 +10,7 @@ use std::{
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
 use anyhow::{anyhow, Result};
+use prehash::Prehashed;
 
 use super::object::{
     Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjString, ObjType,
@@ -73,11 +74,11 @@ enum ValueType {
 
 impl From<Value> for ValueType {
     fn from(value: Value) -> Self {
-        if value.as_num().is_ok() {
+        if value.as_num().is_some() {
             ValueType::Number
-        } else if value.as_bool().is_ok() {
+        } else if value.as_bool().is_some() {
             ValueType::Bool
-        } else if value.as_obj().is_ok() {
+        } else if value.as_obj().is_some() {
             ValueType::Obj
         } else {
             ValueType::Nil
@@ -86,44 +87,60 @@ impl From<Value> for ValueType {
 }
 
 impl Value {
-    pub fn as_num(self) -> Result<f64> {
+    #[inline]
+    pub fn as_num(self) -> Option<f64> {
         #[cfg(feature = "nan-boxing")]
         match self.0 & QNAN != QNAN {
-            true => Ok(f64::from_bits(self.0)),
-            false => Err(anyhow!("Not a number")),
+            true => Some(f64::from_bits(self.0)),
+            false => None,
         }
 
         #[cfg(not(feature = "nan-boxing"))]
         match self {
-            Value::Number(n) => Ok(n),
-            _ => Err(anyhow!("Not a number")),
+            Value::Number(n) => Some(n),
+            _ => None,
         }
     }
 
-    pub fn as_bool(self) -> Result<bool> {
+    #[inline]
+    pub fn as_bool(self) -> Option<bool> {
         #[cfg(feature = "nan-boxing")]
         match self & Self::FALSE == Self::FALSE {
-            true => Ok(self == Self::TRUE),
-            false => Err(anyhow!("Not a bool")),
+            true => Some(self == Self::TRUE),
+            false => None,
         }
         #[cfg(not(feature = "nan-boxing"))]
         match self {
-            Value::Bool(b) => Ok(b),
-            _ => Err(anyhow!("Not a bool")),
+            Value::Bool(b) => Some(b),
+            _ => None,
         }
     }
 
-    pub fn as_obj(self) -> Result<NonNull<Obj>> {
+    #[inline]
+    pub fn as_obj(self) -> Option<NonNull<Obj>> {
         #[cfg(feature = "nan-boxing")]
         match self.0 & OBJ_TAG == OBJ_TAG {
-            true => Ok(NonNull::new((self.0 & !OBJ_TAG) as *mut Obj).unwrap()),
-            false => Err(anyhow!("Not an object")),
+            true => Some(NonNull::new((self.0 & !OBJ_TAG) as *mut Obj).unwrap()),
+            false => None,
         }
         #[cfg(not(feature = "nan-boxing"))]
         match self {
-            Value::Obj(o) => Ok(o),
-            _ => Err(anyhow!("Not an object")),
+            Value::Obj(o) => Some(o),
+            _ => None,
         }
+    }
+
+    #[inline]
+    pub fn hashed(&self) -> Option<Prehashed<Value, u64>> {
+        if let Some(obj) = self.as_obj() {
+            unsafe {
+                if (*obj.as_ptr()).kind == ObjType::String {
+                    let hash = obj.cast::<ObjString>().as_ref().hash;
+                    return Some(Prehashed::new(*self, hash))
+                }
+            }
+        }
+        None
     }
 }
 
@@ -167,9 +184,9 @@ impl Eq for Value {}
 impl Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match (self.as_bool(), self.as_num(), self.as_obj()) {
-            (Ok(b), _, _) => b.hash(state),
-            (_, Ok(n), _) => n.to_bits().hash(state),
-            (_, _, Ok(o)) => unsafe {
+            (Some(b), _, _) => b.hash(state),
+            (_, Some(n), _) => n.to_bits().hash(state),
+            (_, _, Some(o)) => unsafe {
                 (*o.cast::<ObjString>().as_ptr()).hash(state);
             },
             _ => (),
@@ -191,9 +208,9 @@ impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         //#[cfg(not(feature = "nan-boxing"))]
         match (self.as_bool(), self.as_num(), self.as_obj()) {
-            (Ok(b), _, _) => write!(f, "{b}"),
-            (_, Ok(n), _) => write!(f, "{n}"),
-            (_, _, Ok(o)) => unsafe {
+            (Some(b), _, _) => write!(f, "{b}"),
+            (_, Some(n), _) => write!(f, "{n}"),
+            (_, _, Some(o)) => unsafe {
                 // SAFETY: The ObjType enum's entire usage is to validate these pointer casts.
                 // a *const ObjType::String will only ever be generated from a *const ObjString
                 match o.as_ref().kind {
@@ -256,7 +273,7 @@ impl std::ops::Sub for Value {
 
     fn sub(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
-            (Ok(x), Ok(y)) => Ok(Value::from(x - y)),
+            (Some(x), Some(y)) => Ok(Value::from(x - y)),
             _ => Err(anyhow!("cannot subtract {rhs} from {self}")),
         }
     }
@@ -267,7 +284,7 @@ impl std::ops::Div for Value {
 
     fn div(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
-            (Ok(x), Ok(y)) => Ok(Value::from(x / y)),
+            (Some(x), Some(y)) => Ok(Value::from(x / y)),
             _ => Err(anyhow!("cannot divide {self} by {rhs}")),
         }
     }
@@ -278,7 +295,7 @@ impl std::ops::Mul for Value {
 
     fn mul(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
-            (Ok(x), Ok(y)) => Ok(Value::from(x * y)),
+            (Some(x), Some(y)) => Ok(Value::from(x * y)),
             _ => Err(anyhow!("cannot multiply {self} by {rhs}")),
         }
     }
@@ -289,7 +306,7 @@ impl std::ops::Neg for Value {
 
     fn neg(self) -> Self::Output {
         match self.as_num() {
-            Ok(n) => Ok(Self::from(-n)),
+            Some(n) => Ok(Self::from(-n)),
             _ => Err(anyhow!("cannot negate {self}")),
         }
     }
@@ -305,7 +322,7 @@ impl std::ops::Not for Value {
 
 impl std::cmp::PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        if let (Ok(l), Ok(r)) = (self.as_obj(), other.as_obj()) {
+        if let (Some(l), Some(r)) = (self.as_obj(), other.as_obj()) {
             unsafe {
                 (*l.as_ptr()).kind == (*r.as_ptr()).kind
                     && match (*l.as_ptr()).kind {
@@ -325,10 +342,9 @@ impl std::cmp::PartialEq for Value {
                 _ => false,
             }
             #[cfg(feature = "nan-boxing")]
-            if let (Ok(l), Ok(r)) = (self.as_num(), other.as_num()) {
-                l == r
-            } else {
-                self.0 == other.0
+            match (*self & QNAN, *other & QNAN) {
+                (Self(QNAN), Self(QNAN)) => self.0 == other.0,
+                _ => f64::from_bits(self.0) == f64::from_bits(other.0),
             }
         }
     }
@@ -337,7 +353,7 @@ impl std::cmp::PartialEq for Value {
 impl std::cmp::PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self.as_num(), other.as_num()) {
-            (Ok(x), Ok(y)) => x.partial_cmp(&y),
+            (Some(x), Some(y)) => x.partial_cmp(&y),
             _ => None,
         }
     }
@@ -416,9 +432,9 @@ mod tests {
         );
         let bool = Value::from(true);
         let num = Value::from(5.0);
-        assert!(obj.as_obj().is_ok());
+        assert!(obj.as_obj().is_some());
         assert!(bool.as_bool().unwrap());
-        assert!(num.as_num().is_ok());
+        assert!(num.as_num().is_some());
         assert_eq!(ValueType::from(obj), ValueType::Obj);
         assert_eq!(ValueType::from(bool), ValueType::Bool);
         assert_eq!(ValueType::from(num), ValueType::Number);
