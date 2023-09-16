@@ -289,7 +289,7 @@ impl Vm {
 
     fn call_value(&mut self, value: Value, arg_count: u8) -> Result<()> {
         unsafe {
-            let obj = value.as_obj().ok_or_else(|| RuntimeError::BadCall)?;
+            let obj = value.as_obj().ok_or(RuntimeError::BadCall)?;
             match obj.as_ref().kind {
                 ObjType::Closure => self.call(obj.cast(), arg_count),
                 ObjType::Native => {
@@ -564,7 +564,7 @@ impl Vm {
                                     _ => None,
                                 }
                             })
-                            .ok_or_else(|| RuntimeError::InvalidPropertyAccess)?;
+                            .ok_or(RuntimeError::InvalidPropertyAccess)?;
                         let name = read_constant!();
                         if let Some(val) = (*instance).fields.get(
                             &name
@@ -603,7 +603,7 @@ impl Vm {
                         let superclass = self
                             .pop()
                             .as_obj()
-                            .ok_or_else(|| RuntimeError::BadSuperclass)?;
+                            .ok_or(RuntimeError::BadSuperclass)?;
                         self.bind_method(superclass.cast(), name)?;
                     }
                     OpCode::Equal => compare!(==),
@@ -674,7 +674,7 @@ impl Vm {
                         let superclass = self
                             .pop()
                             .as_obj()
-                            .ok_or_else(|| RuntimeError::BadSuperclass)?;
+                            .ok_or(RuntimeError::BadSuperclass)?;
                         self.frames[self.frame_count - 1] = frame;
                         self.invoke_from_class(superclass.cast(), method, arg_count)?;
                         frame = self.frames[self.frame_count - 1];
@@ -739,8 +739,8 @@ impl Vm {
                         let subclass = self.peek(0);
                         let sup = superclass
                             .as_obj()
-                            .ok_or_else(|| RuntimeError::BadSuperclass)?;
-                        let sub = subclass.as_obj().ok_or_else(|| RuntimeError::BadSubclass)?;
+                            .ok_or(RuntimeError::BadSuperclass)?;
+                        let sub = subclass.as_obj().ok_or(RuntimeError::BadSubclass)?;
                         match (*sup.as_ptr()).kind {
                             ObjType::Class => {
                                 let (sup, sub) = (sup.cast::<ObjClass>(), sub.cast::<ObjClass>());
