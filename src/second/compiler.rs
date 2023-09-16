@@ -16,7 +16,7 @@ use super::{
         TokenType::{self, *},
     },
     value::Value,
-    Vm,
+    vm::Vm,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]

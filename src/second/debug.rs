@@ -8,8 +8,6 @@ use super::chunk::{Chunk, OpCode};
 //     }
 // }
 
-
-
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
     print!("{offset:04} ");
     let line = chunk.get_line(offset);

@@ -13,10 +13,10 @@ use anyhow::Result;
 use prehash::Prehashed;
 
 use super::{
-    RuntimeError,
     object::{
         Obj, ObjBoundMethod, ObjClass, ObjClosure, ObjFunction, ObjInstance, ObjString, ObjType,
     },
+    vm::RuntimeError,
 };
 
 #[cfg(not(feature = "nan-boxing"))]
@@ -246,7 +246,9 @@ impl std::ops::Sub for Value {
     fn sub(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x - y)),
-            _ => Err(RuntimeError::BinaryOpError("subtract", self.to_string(), rhs.to_string()).into()),
+            _ => Err(
+                RuntimeError::BinaryOpError("subtract", self.to_string(), rhs.to_string()).into(),
+            ),
         }
     }
 }
@@ -257,7 +259,9 @@ impl std::ops::Div for Value {
     fn div(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x / y)),
-            _ => Err(RuntimeError::BinaryOpError("divide", self.to_string(), rhs.to_string()).into()),
+            _ => {
+                Err(RuntimeError::BinaryOpError("divide", self.to_string(), rhs.to_string()).into())
+            }
         }
     }
 }
@@ -268,7 +272,9 @@ impl std::ops::Mul for Value {
     fn mul(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x * y)),
-            _ => Err(RuntimeError::BinaryOpError("multiply", self.to_string(), rhs.to_string()).into()),
+            _ => Err(
+                RuntimeError::BinaryOpError("multiply", self.to_string(), rhs.to_string()).into(),
+            ),
         }
     }
 }

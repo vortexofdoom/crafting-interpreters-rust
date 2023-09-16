@@ -7,7 +7,7 @@ use std::alloc::System;
 
 use anyhow::Result;
 use clap::Parser;
-use second::Vm;
+use second::vm::Vm;
 use stats_alloc::{StatsAlloc, INSTRUMENTED_SYSTEM};
 
 #[global_allocator]
