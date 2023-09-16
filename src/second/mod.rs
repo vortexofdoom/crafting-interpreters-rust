@@ -41,18 +41,18 @@ const FRAMES_MAX: usize = 64;
 
 #[derive(Debug)]
 pub enum RuntimeError {
-    BinaryOpError(&'static str, Value, Value),
+    BinaryOpError(&'static str, String, String),
     BadCall,
-    BadIdentifier(Value),
+    BadIdentifier(String),
     BadSubclass,
     BadSuperclass,
     InvalidMethodAccess,
     InvalidOpcode(u8),
     InvalidPropertyAccess,
-    NegationError(Value),
+    NegationError(String),
     StackOverflow,
-    UndefinedVariable(Value),
-    UndefinedProperty(Value),
+    UndefinedVariable(String),
+    UndefinedProperty(String),
     WrongNumArguments(u8, u8),
 }
 
@@ -300,7 +300,7 @@ impl Vm {
 
     fn call_value(&mut self, value: Value, arg_count: u8) -> Result<()> {
         unsafe {
-            let obj = value.as_obj().ok_or(RuntimeError::BadCall)?;
+            let obj = value.as_obj().ok_or_else(||RuntimeError::BadCall)?;
             match obj.as_ref().kind {
                 ObjType::Closure => self.call(obj.cast(), arg_count),
                 ObjType::Native => {
@@ -388,9 +388,9 @@ impl Vm {
         unsafe {
             let method = (*class.as_ptr())
                 .methods
-                .get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?)
+                .get(&name.hashed().ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?)
                 .and_then(|v| v.as_obj())
-                .ok_or(RuntimeError::UndefinedProperty(name))?;
+                .ok_or_else(|| RuntimeError::UndefinedProperty(name.to_string()))?;
             let bound = self
                 .heap
                 .new_obj(ObjBoundMethod::new(self.peek(0), method.cast()));
@@ -406,7 +406,7 @@ impl Vm {
             if let Some(o) = receiver.as_obj()
             && (*o.as_ptr()).kind == ObjType::Instance {
                 let instance = o.as_ptr().cast::<ObjInstance>();
-                if let Some(val) = (*instance).fields.get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?) {
+                if let Some(val) = (*instance).fields.get(&name.hashed().ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?) {
                     self.stack[self.sp - arg_count as usize - 1].set(*val);
                     self.call_value(*val, arg_count)
                 } else {
@@ -427,9 +427,9 @@ impl Vm {
         unsafe {
             let method = (*class.as_ptr())
                 .methods
-                .get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?)
+                .get(&name.hashed().ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?)
                 .and_then(|v| v.as_obj())
-                .ok_or(RuntimeError::UndefinedProperty(name))?;
+                .ok_or_else(|| RuntimeError::UndefinedProperty(name.to_string()))?;
             self.call(method.cast(), arg_count)
         }
     }
@@ -515,7 +515,7 @@ impl Vm {
                         {
                             self.push(*value);
                         } else {
-                            bail!(RuntimeError::UndefinedVariable(name));
+                            bail!(RuntimeError::UndefinedVariable(name.to_string()));
                         }
                     }
                     OpCode::DefineGlobal => {
@@ -537,7 +537,7 @@ impl Vm {
                         let value = self.peek(0);
                         if self.globals.insert(pre_hash, value).is_none() {
                             self.globals.remove(&pre_hash);
-                            bail!(RuntimeError::UndefinedVariable(name));
+                            bail!(RuntimeError::UndefinedVariable(name.to_string()));
                         }
                     }
                     OpCode::GetUpvalue => {
@@ -567,11 +567,11 @@ impl Vm {
                                     _ => None,
                                 }
                             })
-                            .ok_or(RuntimeError::InvalidPropertyAccess)?;
+                            .ok_or_else(|| RuntimeError::InvalidPropertyAccess)?;
                         let name = read_constant!();
                         if let Some(val) = (*instance)
                             .fields
-                            .get(&name.hashed().ok_or(RuntimeError::BadIdentifier(name))?)
+                            .get(&name.hashed().ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?)
                         {
                             self.pop();
                             self.push(*val);
@@ -587,7 +587,7 @@ impl Vm {
                                 let instance = obj.cast::<ObjInstance>();
                                 let name = read_constant!();
                                 (*instance).fields.insert(
-                                    name.hashed().ok_or(RuntimeError::BadIdentifier(name))?,
+                                    name.hashed().ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?,
                                     self.peek(0),
                                 );
                                 let value = self.pop();
@@ -600,7 +600,7 @@ impl Vm {
                     }
                     OpCode::GetSuper => {
                         let name = read_constant!();
-                        let superclass = self.pop().as_obj().ok_or(RuntimeError::BadSuperclass)?;
+                        let superclass = self.pop().as_obj().ok_or_else(|| RuntimeError::BadSuperclass)?;
                         self.bind_method(superclass.cast(), name)?;
                     }
                     OpCode::Equal => compare!(==),
@@ -618,7 +618,7 @@ impl Vm {
                             let obj = self.new_obj(ObjString::new(format!("{l}{r}")));
                             Value::from(obj)
                         } else {
-                            bail!(RuntimeError::BinaryOpError("add", l, r));
+                            bail!(RuntimeError::BinaryOpError("add", l.to_string(), r.to_string()));
                         };
                         self.pop();
                         self.pop();
@@ -668,7 +668,7 @@ impl Vm {
                     OpCode::SuperInvoke => {
                         let method = read_constant!();
                         let arg_count = read_byte!();
-                        let superclass = self.pop().as_obj().ok_or(RuntimeError::BadSuperclass)?;
+                        let superclass = self.pop().as_obj().ok_or_else(|| RuntimeError::BadSuperclass)?;
                         self.frames[self.frame_count - 1] = frame;
                         self.invoke_from_class(superclass.cast(), method, arg_count)?;
                         frame = self.frames[self.frame_count - 1];
@@ -676,7 +676,7 @@ impl Vm {
                     OpCode::Closure => {
                         let name = read_constant!();
                         name.as_obj()
-                            .ok_or(RuntimeError::BadIdentifier(name))
+                            .ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))
                             .map(|o| {
                                 let closure = self
                                     .heap
@@ -723,7 +723,7 @@ impl Vm {
                         let name = read_constant!();
                         let name = name
                             .as_obj()
-                            .ok_or(RuntimeError::BadIdentifier(name))?
+                            .ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?
                             .cast();
                         let class = self.new_obj(ObjClass::new(name));
                         self.push(Value::from(class));
@@ -731,8 +731,8 @@ impl Vm {
                     OpCode::Inherit => {
                         let superclass = self.peek(1);
                         let subclass = self.peek(0);
-                        let sup = superclass.as_obj().ok_or(RuntimeError::BadSuperclass)?;
-                        let sub = subclass.as_obj().ok_or(RuntimeError::BadSubclass)?;
+                        let sup = superclass.as_obj().ok_or_else(|| RuntimeError::BadSuperclass)?;
+                        let sub = subclass.as_obj().ok_or_else(|| RuntimeError::BadSubclass)?;
                         match (*sup.as_ptr()).kind {
                             ObjType::Class => {
                                 let (sup, sub) = (sup.cast::<ObjClass>(), sub.cast::<ObjClass>());
@@ -747,7 +747,7 @@ impl Vm {
                         let method = self.peek(0);
                         let class = self.peek(1).as_obj().unwrap().cast::<ObjClass>().as_ptr();
                         (*class).methods.insert(
-                            name.hashed().ok_or(RuntimeError::BadIdentifier(name))?,
+                            name.hashed().ok_or_else(|| RuntimeError::BadIdentifier(name.to_string()))?,
                             method,
                         );
                         self.pop();

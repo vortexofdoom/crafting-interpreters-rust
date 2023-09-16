@@ -182,9 +182,9 @@ impl std::fmt::Display for Value {
         match (self.as_bool(), self.as_num(), self.as_obj()) {
             (Some(b), _, _) => write!(f, "{b}"),
             (_, Some(n), _) => write!(f, "{n}"),
+            // SAFETY: The ObjType enum's entire usage is to validate these pointer casts.
+            // a *const ObjType::String will only ever be generated from a *const ObjString
             (_, _, Some(o)) => unsafe {
-                // SAFETY: The ObjType enum's entire usage is to validate these pointer casts.
-                // a *const ObjType::String will only ever be generated from a *const ObjString
                 match o.as_ref().kind {
                     ObjType::String => write!(f, "{}", o.cast::<ObjString>().as_ref()),
                     ObjType::Function => write!(f, "{}", o.cast::<ObjFunction>().as_ref()),
@@ -246,7 +246,7 @@ impl std::ops::Sub for Value {
     fn sub(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x - y)),
-            _ => Err(RuntimeError::BinaryOpError("subtract", self, rhs).into()),
+            _ => Err(RuntimeError::BinaryOpError("subtract", self.to_string(), rhs.to_string()).into()),
         }
     }
 }
@@ -257,7 +257,7 @@ impl std::ops::Div for Value {
     fn div(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x / y)),
-            _ => Err(RuntimeError::BinaryOpError("divide", self, rhs).into()),
+            _ => Err(RuntimeError::BinaryOpError("divide", self.to_string(), rhs.to_string()).into()),
         }
     }
 }
@@ -268,7 +268,7 @@ impl std::ops::Mul for Value {
     fn mul(self, rhs: Self) -> Self::Output {
         match (self.as_num(), rhs.as_num()) {
             (Some(x), Some(y)) => Ok(Value::from(x * y)),
-            _ => Err(RuntimeError::BinaryOpError("multiply", self, rhs).into()),
+            _ => Err(RuntimeError::BinaryOpError("multiply", self.to_string(), rhs.to_string()).into()),
         }
     }
 }
@@ -279,7 +279,7 @@ impl std::ops::Neg for Value {
     fn neg(self) -> Self::Output {
         match self.as_num() {
             Some(n) => Ok(Self::from(-n)),
-            _ => Err(RuntimeError::NegationError(self).into()),
+            _ => Err(RuntimeError::NegationError(self.to_string()).into()),
         }
     }
 }
