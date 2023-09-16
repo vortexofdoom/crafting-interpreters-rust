@@ -351,7 +351,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                 () => {{
                     col += 1;
                     let next = chars.next();
-                    if next?.1 == '\n' {
+                    if next.is_some_and(|(_, c)| c == '\n') {
                         line += 1;
                         col = 0;
                     }
@@ -363,16 +363,16 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                 let start = col;
                 macro_rules! pack {
                     ($res:expr) => {
-                        Some(Parsed((line, start), $res))
+                        return Some(Parsed((line, start), $res))
                     };
 
                     ($c1:ident, $c2:ident) => {{
                         match chars.peek() {
                             Some((_, '=')) => {
                                 advance!();
-                                return pack!(Ok($c1));
+                                pack!(Ok($c1));
                             }
-                            _ => return pack!(Ok($c2)),
+                            _ => pack!(Ok($c2)),
                         }
                     }};
                 }
@@ -380,22 +380,22 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                     '"' => {
                         while let Some((j, next)) = advance!() {
                             if next == '"' {
-                                return pack!(Ok(String(&source[i + 1..j])));
+                                pack!(Ok(String(&source[i + 1..j])));
                             }
                         }
                         // if we reach this point it means we've reached the end of the source code
-                        return pack!(Err(anyhow!(ScanError::UnterminatedString)));
+                        pack!(Err(anyhow!(ScanError::UnterminatedString)));
                     }
                     // Code specific to handling comments
                     '/' => match chars.peek() {
                         Some((_, '/')) => {
                             let curr = line;
                             while line == curr {
-                                advance!();
+                                advance!()?;
                             }
                             continue;
                         }
-                        _ => return pack!(Ok(Slash)),
+                        _ => pack!(Ok(Slash)),
                     },
                     // One or two character tokens
                     '!' => pack!(BangEqual, Bang),
@@ -405,7 +405,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
 
                     // Invariably single character tokens
                     c @ ('(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*') => {
-                        return pack!(Ok(Token::from_char(c)?))
+                        pack!(Ok(Token::from_char(c)?))
                     }
                     x if x.is_ascii_digit() => {
                         let mut end = i + 1;
@@ -429,7 +429,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             .parse()
                             .map_err(|_| anyhow!("error parsing number {}.", &source[i..end]))
                             .map(Token::Number);
-                        return pack!(num);
+                        pack!(num);
                     }
                     a if a == '_' || a.is_ascii_alphabetic() => {
                         let mut end = i + 1;
@@ -441,10 +441,10 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             advance!();
                         }
 
-                        return pack!(Ok(Token::from_str(&source[i..end])));
+                        pack!(Ok(Token::from_str(&source[i..end])));
                     }
                     w if w.is_whitespace() => continue,
-                    c => return pack!(Err(anyhow!(ScanError::UnrecognizedCharacter(c)))),
+                    c => pack!(Err(anyhow!(ScanError::UnrecognizedCharacter(c)))),
                 }
             }
         })

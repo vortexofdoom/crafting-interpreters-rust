@@ -374,7 +374,6 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     pub fn parse(&mut self) -> bool {
         let mut had_err = false;
         while self.tokens.peek().is_some() {
-            //self.collect_garbage();
             if self.declaration().err().is_some() && !had_err {
                 had_err = true;
             }
