@@ -11,10 +11,7 @@ use super::{
     chunk::{Chunk, OpCode},
     memory::NEXT_GC,
     object::{FunctionType, IsObj, Obj, ObjFunction, ObjString},
-    scanner::{
-        scan, Parsed, Token,
-        TokenType::{self, *},
-    },
+    scanner::{scan, Parsed, Token, TokenType as TT},
     value::Value,
     vm::Vm,
 };
@@ -145,17 +142,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> ParseRule<'a, T> {
 
     #[inline]
     fn prefix(token: Token) -> ParseFn<'a, T> {
-        Self::RULES[TokenType::from(token).into_usize()].0
+        Self::RULES[TT::from(token).into_usize()].0
     }
 
     #[inline]
     fn infix(token: Token) -> ParseFn<'a, T> {
-        Self::RULES[TokenType::from(token).into_usize()].1
+        Self::RULES[TT::from(token).into_usize()].1
     }
 
     #[inline]
     fn precedence(token: Token) -> Precedence {
-        Self::RULES[TokenType::from(token).into_usize()].2
+        Self::RULES[TT::from(token).into_usize()].2
     }
 }
 
@@ -318,17 +315,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         while self.tokens.peek().is_some_and(|p| *p != Token::RightBrace) {
             let _ = self.declaration();
         }
-        self.consume_token(TokenType::RightBrace)
+        self.consume_token(TT::RightBrace)
     }
 
-    fn consume_token(&mut self, token: TokenType) -> Result<()> {
+    fn consume_token(&mut self, token: TT) -> Result<()> {
         match self.tokens.peek() {
             Some(Parsed(_, Ok(t))) if *t == token => self.advance(),
             _ => Err(anyhow!("expected {token}")),
         }
     }
 
-    fn match_token(&mut self, token: TokenType) -> Result<bool> {
+    fn match_token(&mut self, token: TT) -> Result<bool> {
         if self.tokens.peek().is_some_and(|t| *t == token) {
             self.advance()?;
             Ok(true)
@@ -420,11 +417,11 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn declaration(&mut self) -> Result<()> {
-        let dec = if self.match_token(Class)? {
+        let dec = if self.match_token(TT::Class)? {
             self.class_dec()
-        } else if self.match_token(Fun)? {
+        } else if self.match_token(TT::Fun)? {
             self.fun_dec()
-        } else if self.match_token(Var)? {
+        } else if self.match_token(TT::Var)? {
             self.var_dec()
         } else {
             self.statement()
@@ -438,7 +435,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn class_dec(&mut self) -> Result<()> {
-        self.consume_token(Identifier)?;
+        self.consume_token(TT::Identifier)?;
         let (l, Token::Identifier(name_str)) = self.prev.unwrap() else {
             unreachable!()
         };
@@ -455,8 +452,8 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         };
 
         self.current_class = NonNull::new(&mut class_compiler as *mut ClassCompiler);
-        if self.match_token(Less)? {
-            self.consume_token(Identifier)?;
+        if self.match_token(TT::Less)? {
+            self.consume_token(TT::Identifier)?;
             self.variable(false)?;
             // Store superclass
             self.begin_scope();
@@ -470,14 +467,14 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         }
 
         self.named_variable(name_str, l, false)?;
-        self.consume_token(LeftBrace)?;
+        self.consume_token(TT::LeftBrace)?;
 
         // method declarations
-        while self.tokens.peek().is_some_and(|t| *t != RightBrace) {
+        while self.tokens.peek().is_some_and(|t| *t != TT::RightBrace) {
             self.method()?;
         }
 
-        self.consume_token(RightBrace)?;
+        self.consume_token(TT::RightBrace)?;
         self.emit_byte(OpCode::Pop);
         if self
             .current_class
@@ -490,7 +487,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn method(&mut self) -> Result<()> {
-        self.consume_token(Identifier)?;
+        self.consume_token(TT::Identifier)?;
         let Token::Identifier(name) = self.previous() else {
             unreachable!()
         };
@@ -507,17 +504,17 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn dot(&mut self, can_assign: bool) -> Result<()> {
-        self.consume_token(Identifier)?;
+        self.consume_token(TT::Identifier)?;
         let Token::Identifier(n) = self.prev.unwrap().1 else {
             unreachable!()
         };
         let obj = self.new_obj(ObjString::new(n.to_string()));
         let name = self.add_constant(Value::from(obj))?;
-        if can_assign && self.match_token(Equal)? {
+        if can_assign && self.match_token(TT::Equal)? {
             self.expression()?;
             self.emit_byte(OpCode::SetProperty);
             self.emit_byte(name);
-        } else if self.match_token(LeftParen)? {
+        } else if self.match_token(TT::LeftParen)? {
             let arg_count = self.argument_list()?;
             self.emit_byte(OpCode::Invoke);
             self.emit_byte(name);
@@ -588,20 +585,20 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         self.current_compiler = NonNull::new(addr_of_mut!(compiler)).unwrap();
 
         self.begin_scope();
-        self.consume_token(LeftParen)?;
-        if self.tokens.peek().is_some_and(|t| *t != RightParen) {
+        self.consume_token(TT::LeftParen)?;
+        if self.tokens.peek().is_some_and(|t| *t != TT::RightParen) {
             loop {
                 self.inc_arity()?;
 
                 let constant = self.parse_variable()?;
                 self.define_variable(constant.0)?;
-                if !self.match_token(Comma)? {
+                if !self.match_token(TT::Comma)? {
                     break;
                 }
             }
         }
-        self.consume_token(RightParen)?;
-        self.consume_token(LeftBrace)?;
+        self.consume_token(TT::RightParen)?;
+        self.consume_token(TT::LeftBrace)?;
         self.block()?;
         self.emit_return();
 
@@ -621,19 +618,19 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn var_dec(&mut self) -> Result<()> {
         let (global, line) = self.parse_variable()?;
-        if self.match_token(Equal)? {
+        if self.match_token(TT::Equal)? {
             self.expression()?;
         } else {
             self.chunk().write(OpCode::Nil, line);
         }
-        self.consume_token(Semicolon)?;
+        self.consume_token(TT::Semicolon)?;
 
         // Define variable
         self.define_variable(global)
     }
 
     fn parse_variable(&mut self) -> Result<(u8, usize)> {
-        self.consume_token(Identifier)?;
+        self.consume_token(TT::Identifier)?;
         // this is infalliable since if it wasn't an identifier we'd return with an error after the previous line
         let Some((l, Token::Identifier(s))) = self.prev else {
             unreachable!()
@@ -742,15 +739,15 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         && unsafe { !(*curr.as_ptr()).has_superclass } {
             return Err(anyhow!("Can't use 'super' in a class with no superclass."));
         }
-        self.consume_token(Dot)?;
-        self.consume_token(Identifier)?;
+        self.consume_token(TT::Dot)?;
+        self.consume_token(TT::Identifier)?;
         let (line, Token::Identifier(name)) = self.prev.unwrap() else {
             unreachable!()
         };
         let obj = self.new_obj(ObjString::new(name.to_string()));
         let name = self.add_constant(Value::from(obj))?;
         self.named_variable("this", line, false)?;
-        if self.match_token(LeftParen)? {
+        if self.match_token(TT::LeftParen)? {
             let arg_count = self.argument_list()?;
             self.named_variable("super", line, false)?;
             self.emit_byte(OpCode::SuperInvoke);
@@ -792,7 +789,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 )
             };
 
-        if can_assign && self.match_token(Equal)? {
+        if can_assign && self.match_token(TT::Equal)? {
             self.expression()?;
             self.emit_byte(set_op);
         } else {
@@ -861,7 +858,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     fn expression_stmt(&mut self) -> Result<()> {
         let line = self.prev.map(|(l, _)| l).unwrap_or(1);
         self.expression()?;
-        self.consume_token(TokenType::Semicolon)?;
+        self.consume_token(TT::Semicolon)?;
         self.chunk().write(OpCode::Pop, line);
         Ok(())
     }
@@ -873,24 +870,24 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn statement(&mut self) -> Result<()> {
         // TODO: fix error propagation
-        if self.match_token(LeftBrace)? {
+        if self.match_token(TT::LeftBrace)? {
             self.begin_scope();
             if let Err(e) = self.block() {
                 println!("{e}");
             }
             self.end_scope()
-        } else if self.match_token(For)? {
+        } else if self.match_token(TT::For)? {
             self.for_stmt()
-        } else if self.match_token(If)? {
+        } else if self.match_token(TT::If)? {
             self.if_stmt()
-        } else if self.match_token(Print)? {
+        } else if self.match_token(TT::Print)? {
             self.expression()?;
-            self.consume_token(TokenType::Semicolon)?;
+            self.consume_token(TT::Semicolon)?;
             self.emit_byte(OpCode::Print);
             Ok(())
-        } else if self.match_token(Return)? {
+        } else if self.match_token(TT::Return)? {
             self.return_stmt()
-        } else if self.match_token(While)? {
+        } else if self.match_token(TT::While)? {
             self.while_stmt()
         } else {
             self.expression_stmt()
@@ -899,10 +896,10 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn for_stmt(&mut self) -> Result<()> {
         self.begin_scope();
-        self.consume_token(TokenType::LeftParen)?;
-        if self.match_token(TokenType::Semicolon)? {
+        self.consume_token(TT::LeftParen)?;
+        if self.match_token(TT::Semicolon)? {
             // No initializer
-        } else if self.match_token(TokenType::Var)? {
+        } else if self.match_token(TT::Var)? {
             self.var_dec()?;
         } else {
             self.expression_stmt()?;
@@ -910,21 +907,21 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
         let mut loop_start = self.chunk().code().len();
         let mut exit_jump = -1;
-        if !self.match_token(TokenType::Semicolon)? {
+        if !self.match_token(TT::Semicolon)? {
             self.expression()?;
-            self.consume_token(TokenType::Semicolon)?;
+            self.consume_token(TT::Semicolon)?;
 
             let line = self.prev.unwrap().0;
             exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
             self.chunk().write(OpCode::Pop, line);
         }
 
-        if !self.match_token(TokenType::RightParen)? {
+        if !self.match_token(TT::RightParen)? {
             let body_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
             let inc_start = self.chunk().code().len();
             self.expression()?;
             self.emit_byte(OpCode::Pop);
-            self.consume_token(TokenType::RightParen)?;
+            self.consume_token(TT::RightParen)?;
 
             self.emit_loop(loop_start)?;
             loop_start = inc_start;
@@ -940,9 +937,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
     }
 
     fn if_stmt(&mut self) -> Result<()> {
-        self.consume_token(TokenType::LeftParen)?;
+        self.consume_token(TT::LeftParen)?;
         self.expression()?;
-        self.consume_token(TokenType::RightParen)?;
+        self.consume_token(TT::RightParen)?;
 
         let then_jump = self.emit_jump(OpCode::JumpIfFalse, self.prev.unwrap().0);
         self.emit_byte(OpCode::Pop);
@@ -952,7 +949,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
         let else_jump = self.emit_jump(OpCode::Jump, self.prev.unwrap().0);
         self.patch_jump(then_jump as usize)?;
         self.emit_byte(OpCode::Pop);
-        if self.match_token(TokenType::Else)? {
+        if self.match_token(TT::Else)? {
             // Does this get else-if for free? I think it might
             self.statement()?;
         }
@@ -965,14 +962,14 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                 return Err(anyhow!("can't return from top-level code"));
             }
         }
-        if self.match_token(Semicolon)? {
+        if self.match_token(TT::Semicolon)? {
             self.emit_return();
         } else {
             if self.check_function_type(FunctionType::Initializer) {
                 return Err(anyhow!("Can't return a value from an initializer."));
             }
             self.expression()?;
-            self.consume_token(Semicolon)?;
+            self.consume_token(TT::Semicolon)?;
             self.emit_byte(OpCode::Return);
         }
         Ok(())
@@ -980,9 +977,9 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn while_stmt(&mut self) -> Result<()> {
         let loop_start = self.chunk().code().len();
-        self.consume_token(TokenType::LeftParen)?;
+        self.consume_token(TT::LeftParen)?;
         self.expression()?;
-        self.consume_token(TokenType::RightParen)?;
+        self.consume_token(TT::RightParen)?;
         let line = self.prev.unwrap().0;
 
         let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
@@ -1022,19 +1019,19 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn argument_list(&mut self) -> Result<u8> {
         let mut arg_count = 0;
-        if !self.tokens.peek().is_some_and(|t| *t == RightParen) {
+        if !self.tokens.peek().is_some_and(|t| *t == TT::RightParen) {
             loop {
                 self.expression()?;
                 if arg_count == 255 {
                     return Err(anyhow!("can't have more than 255 arguments"));
                 }
                 arg_count += 1;
-                if !self.match_token(Comma)? {
+                if !self.match_token(TT::Comma)? {
                     break;
                 }
             }
         }
-        self.consume_token(RightParen)?;
+        self.consume_token(TT::RightParen)?;
         Ok(arg_count)
     }
 
@@ -1098,7 +1095,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
 
     fn grouping(&mut self, _: bool) -> Result<()> {
         self.expression()?;
-        self.consume_token(TokenType::RightParen)?;
+        self.consume_token(TT::RightParen)?;
         Ok(())
     }
 
@@ -1119,7 +1116,7 @@ impl<'a, T: Iterator<Item = Parsed<Token<'a>>>> Parser<'a, T> {
                         let infix = ParseRule::infix(self.previous())
                             .expect("should be an infix rule.");                        
                         infix(self, can_assign)?;
-                        if can_assign && self.match_token(TokenType::Equal)? {
+                        if can_assign && self.match_token(TT::Equal)? {
                             return Err(anyhow!("Invalid assignment target"));
                         }
                     }

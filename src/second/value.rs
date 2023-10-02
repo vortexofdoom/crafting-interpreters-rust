@@ -6,9 +6,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(feature = "nan-boxing")]
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
-
 use anyhow::Result;
 use prehash::Prehashed;
 
@@ -41,19 +38,15 @@ impl Value {
     pub const TRUE: Self = Self(QNAN | TRUE_TAG);
 }
 
-#[cfg(feature = "nan-boxing")]
-const SIGN_BIT: u64 = 0x8000000000000000;
 /// NAN bits for IEEE 754 + quiet bit + Intel FP Indefinate value
-#[cfg(feature = "nan-boxing")]
-const QNAN: u64 = 0x7ffc000000000000;
-#[cfg(feature = "nan-boxing")]
-const NIL_TAG: u64 = 0b01;
-#[cfg(feature = "nan-boxing")]
-const FALSE_TAG: u64 = 0b10;
-#[cfg(feature = "nan-boxing")]
-const TRUE_TAG: u64 = 0b11;
-#[cfg(feature = "nan-boxing")]
+/// Used along with other tag values to denote the non-numeric Value types
+const QNAN: u64 = 0b0111111111111100000000000000000000000000000000000000000000000000;
+/// Sign bit is used to deno
+const SIGN_BIT: u64 = 0b1000000000000000000000000000000000000000000000000000000000000000;
 const OBJ_TAG: u64 = SIGN_BIT | QNAN;
+const NIL_TAG: u64 = 0b01;
+const FALSE_TAG: u64 = 0b10;
+const TRUE_TAG: u64 = 0b11;
 
 #[cfg(feature = "nan-boxing")]
 impl From<Value> for u64 {
@@ -85,6 +78,8 @@ impl From<Value> for ValueType {
 }
 
 impl Value {
+    /// Returns an `f64` if the Value is of type `Number`, otherwise returns `None`.
+    /// Serves as a convenient access for the contained value with a validity check for safety.
     #[inline]
     pub fn as_num(self) -> Option<f64> {
         #[cfg(feature = "nan-boxing")]
@@ -100,6 +95,8 @@ impl Value {
         }
     }
 
+    /// Returns a `bool` if the Value is of type `Bool`, otherwise returns `None`.
+    /// Serves as a convenient access for the contained value with a validity check for safety.
     #[inline]
     pub fn as_bool(self) -> Option<bool> {
         #[cfg(feature = "nan-boxing")]
@@ -114,6 +111,8 @@ impl Value {
         }
     }
 
+    /// Returns a `Nonnull<Obj>` if the Value is of type `Obj`, otherwise returns `None`.
+    /// Serves as a convenient access for the contained value with a validity check for safety.
     #[inline]
     pub fn as_obj(self) -> Option<NonNull<Obj>> {
         #[cfg(feature = "nan-boxing")]
@@ -128,20 +127,23 @@ impl Value {
         }
     }
 
+    /// Constructs a Prehashed from a `Value` and its included hash.
+    /// If the `Value` is not of type `ObjString`, this will return `None`.
     #[inline]
     pub fn hashed(&self) -> Option<Prehashed<Value, u64>> {
-        if let Some(obj) = self.as_obj() {
-            unsafe {
-                if (*obj.as_ptr()).kind == ObjType::String {
+        unsafe {
+            self.as_obj().and_then(|obj| match (*obj.as_ptr()).kind {
+                ObjType::String => {
                     let hash = obj.cast::<ObjString>().as_ref().hash;
-                    return Some(Prehashed::new(*self, hash));
+                    Some(Prehashed::new(*self, hash))
                 }
-            }
+                _ => None,
+            })
         }
-        None
     }
 }
 
+// Basically just making concrete that `Nil` is equivalent to `Option<Value>::None`
 impl<T> From<Option<T>> for Value
 where
     T: Into<Value>,
@@ -167,12 +169,15 @@ impl Hash for Value {
 }
 
 impl Value {
+    /// In Lox, False and Nil are falsey, and all other values (even 0) are truthy.
     pub fn is_truthy(self) -> bool {
         self.as_bool().unwrap_or(self != Self::Nil)
     }
 
+    /// Returns the seconds since January 1, 1970 as a 64 bit floating point integer
+    /// This is the only native function defined in the Lox standard
     pub fn clock(_: Option<&[Cell<Self>]>) -> Self {
-        Self::from(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_millis() as f64 / 1000.0)
+        Self::from(SystemTime::elapsed(&UNIX_EPOCH).unwrap().as_secs_f64())
     }
 }
 
@@ -183,7 +188,7 @@ impl std::fmt::Display for Value {
             (Some(b), _, _) => write!(f, "{b}"),
             (_, Some(n), _) => write!(f, "{n}"),
             // SAFETY: The ObjType enum's entire usage is to validate these pointer casts.
-            // a *const ObjType::String will only ever be generated from a *const ObjString
+            // the only Obj with ObjType::String will be part of an ObjString
             (_, _, Some(o)) => unsafe {
                 match o.as_ref().kind {
                     ObjType::String => write!(f, "{}", o.cast::<ObjString>().as_ref()),
@@ -340,38 +345,45 @@ impl std::cmp::PartialOrd for Value {
 impl PartialEq<str> for Value {
     fn eq(&self, other: &str) -> bool {
         self.as_obj()
-            .map(|o| unsafe { o.cast::<ObjString>().as_ref().deref() == other })
+            .map(|o| unsafe {
+                (*o.as_ptr()).kind == ObjType::String
+                    && o.cast::<ObjString>().as_ref().deref() == other
+            })
             .unwrap_or(false)
     }
 }
 
-macro_rules! impl_op {
-    ($name:ident<$t:ident>, $fun:tt, $op:tt) => {
-        #[cfg(feature = "nan-boxing")]
-        impl<$t> $name<$t> for Value
-        where $t: Into<u64> {
-            type Output = Self;
+#[cfg(feature = "nan-boxing")]
+mod bitwise_ops {
+    use super::Value;
+    use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
-            fn $fun(self, rhs: $t) -> Self::Output {
-                Self(self.0 $op rhs.into())
-            }
-        }
-    };
+    macro_rules! impl_op {
+        ($name:ident<$t:ident>, $fun:tt, $op:tt) => {
+            impl<$t> $name<$t> for Value
+            where $t: Into<u64> {
+                type Output = Self;
 
-    ($name:tt, $fun:tt, $op:tt) => {
-        #[cfg(feature = "nan-boxing")]
-        impl $name for Value {
-            fn $fun(&mut self, rhs: Self) {
-                self.0 $op rhs.0;
+                fn $fun(self, rhs: $t) -> Self::Output {
+                    Self(self.0 $op rhs.into())
+                }
             }
-        }
-    };
+        };
+
+        ($name:tt, $fun:tt, $op:tt) => {
+            impl $name for Value {
+                fn $fun(&mut self, rhs: Self) {
+                    self.0 $op rhs.0;
+                }
+            }
+        };
+    }
+
+    impl_op!(BitAnd<T>, bitand, &);
+    impl_op!(BitOr<T>, bitor, |);
+    impl_op!(BitOrAssign, bitor_assign, |=);
+    impl_op!(BitAndAssign, bitand_assign, &=);
 }
-
-impl_op!(BitAnd<T>, bitand, &);
-impl_op!(BitOr<T>, bitor, |);
-impl_op!(BitOrAssign, bitor_assign, |=);
-impl_op!(BitAndAssign, bitand_assign, &=);
 
 macro_rules! impl_from {
     ($ty:ty, $var:tt, $value:ident, $expr:expr$(,)?) => {

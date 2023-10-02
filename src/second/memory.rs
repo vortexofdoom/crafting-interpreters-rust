@@ -16,7 +16,7 @@ use super::{
     value::Value,
 };
 
-pub static NEXT_GC: AtomicIsize = AtomicIsize::new(3);
+pub static NEXT_GC: AtomicIsize = AtomicIsize::new(1024 * 1024);
 const GC_GROW_FACTOR: isize = 2;
 
 #[derive(Debug)]
@@ -33,6 +33,8 @@ impl Heap {
         }
     }
 
+    /// Allocates a new Obj of type T on the heap, and returns a pointer to the Obj header
+    /// The new Obj is added to the heap's objects list so it is not lost when the VM can no longer access it.
     pub fn new_obj<T: IsObj>(&mut self, obj: T) -> NonNull<Obj> {
         //println!("currently allocated: {}, next GC: {}", GLOBAL.stats().bytes_reallocated, NEXT_GC.load(Ordering::Relaxed));
         let new: NonNull<Obj> = NonNull::new(Box::into_raw(Box::new(obj)).cast()).unwrap();
@@ -64,29 +66,32 @@ impl Heap {
         }
     }
 
+    /// Marks the Obj as accessible (not to be deallocated) and pushes it to the graystack to be blackened
+    /// If the Obj is already marked, this has no effect.
     pub fn mark_obj(&mut self, obj: NonNull<Obj>) {
         unsafe {
-            //println!("checking: {}", Value::from(obj));
             if !(*obj.as_ptr()).is_marked {
-                //println!("marking: {}", Value::from(obj));
                 (*obj.as_ptr()).is_marked = true;
                 self.graystack.push(obj);
             }
         }
     }
 
+    /// If the value is of type Obj, mark it as accessible, otherwise do nothing
     pub fn mark_value(&mut self, value: Value) {
         if let Some(o) = value.as_obj() {
             self.mark_obj(o);
         }
     }
 
+    /// Goes through every Obj on the graystack and finds any accessible Obj pointers, adding those to the graystack in turn.
     pub fn trace_references(&mut self) {
         while let Some(obj) = self.graystack.pop() {
             self.blacken_object(obj.as_ptr());
         }
     }
 
+    /// Recursively traverses through the references to allocated Objects accessible from the given pointer, and marks each one in turn.
     fn blacken_object(&mut self, obj: *mut Obj) {
         unsafe {
             match (*obj).kind {
@@ -133,6 +138,8 @@ impl Heap {
         }
     }
 
+    /// Frees the Obj
+    /// This is accomplished by casting to the appropriate type so all the memory originally allocated is then deallocated.
     unsafe fn free_object(&mut self, obj: *mut Obj) {
         match (*obj).kind {
             ObjType::BoundMethod => drop(Box::from_raw(obj.cast::<ObjBoundMethod>())),
@@ -146,6 +153,8 @@ impl Heap {
         }
     }
 
+    /// Traverses the list of objects and drops those that are not marked
+    /// Adjusts the GC threshold based on how much memory is still in use post-GC.
     pub fn sweep(&mut self) {
         //let prev_bytes = GLOBAL.stats().bytes_reallocated;
         let mut prev = None;

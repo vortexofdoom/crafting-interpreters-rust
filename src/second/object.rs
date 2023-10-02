@@ -69,15 +69,14 @@ pub struct Obj {
 }
 
 /// The base type for Lox Strings
-/// Inlining length and turning it into a dynamically sized type could increase performance
-/// TODO: Figure out how to format raw strs/byte arrays
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ObjString {
     pub obj: Obj,
+    pub hash: u64,
     // This is an extra word in heap memory vs the book's representation,
     // but it comes with ergonomics (and potential optimization later)
-    pub hash: u64,
+    // Inlining length and turning it into a dynamically sized type could increase performance by removing one pointer indirection.
     string: String,
 }
 
@@ -126,14 +125,18 @@ impl std::fmt::Display for ObjString {
     }
 }
 
+/// Enum for differentiating between different Lox function types during compilation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FunctionType {
-    Script,
-    Function,
-    Method,
-    Initializer,
+    Script,      // Top-level function, no name
+    Function,    // Unassociated function, no internal class reference
+    Method,      // Associated function, part of a class declaration
+    Initializer, // Specialized method that implicitly returns an instance of a class
 }
 
+/// Raw Lox function
+/// Contains all of the compiled bytecode and information about the function
+/// But will not be shown to the VM directly.
 #[repr(C)]
 #[derive(Debug)]
 pub struct ObjFunction {
@@ -141,6 +144,7 @@ pub struct ObjFunction {
     pub arity: u8,
     pub upvalue_count: u8,
     pub chunk: Chunk,
+    // may want to make this an objstring for consistency
     pub name: Option<String>,
 }
 
@@ -172,6 +176,7 @@ impl ObjFunction {
     }
 }
 
+/// Object holding a native function pointer
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ObjNative {
@@ -201,6 +206,8 @@ impl ObjNative {
     }
 }
 
+/// A Lox function object that can close over external variables
+/// All Lox functions are wrapped in a closure before being presented to the VM, even if they do not require closure functionality
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ObjClosure {
@@ -228,7 +235,9 @@ impl ObjClosure {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Enum for differentiating between open (ie. still actively on the stack) and closed (ie. owned by this allocation) upvalues
+/// Similar conceptually to a `Cow<Value>`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Upvalue {
     Open(usize),
     Closed(Cell<Value>),
@@ -243,6 +252,8 @@ pub struct ObjUpvalue {
 }
 
 impl ObjUpvalue {
+    /// Creates a new ObjUpvalue, taking the stack slot where the Value in question resides as an argument.
+    /// All new upvalues are open, and reside on the stack until closed over.
     pub fn new(value: usize) -> Self {
         Self {
             obj: Obj::upvalue(),
@@ -252,6 +263,8 @@ impl ObjUpvalue {
     }
 }
 
+/// Lox class
+/// Contains the class name as well as a table of methods defined in the class declaration.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ObjClass {
@@ -270,6 +283,8 @@ impl ObjClass {
     }
 }
 
+/// Instance of a Lox class.
+/// Contains a reference to the instantiated class, and a table of fields defined after instantiation as the object is utilized in user code.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ObjInstance {

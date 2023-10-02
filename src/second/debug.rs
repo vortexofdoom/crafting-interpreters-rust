@@ -11,9 +11,7 @@ use super::chunk::{Chunk, OpCode};
 pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
     print!("{offset:04} ");
     let line = chunk.get_line(offset);
-    if offset == 0 {
-        print!("0001 ");
-    } else if line == chunk.get_line(offset.saturating_sub(1)) {
+    if offset > 0 && line == chunk.get_line(offset.saturating_sub(1)) {
         print!("   | ");
     } else {
         print!("{:04} ", line + 1);

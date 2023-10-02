@@ -134,10 +134,12 @@ impl Vm {
         let name = self.new_obj(ObjString::new(String::from(name)));
         let hash = unsafe { name.cast::<ObjString>().as_ref().hash };
         let pre_hash = Prehashed::new(Value::from(name), hash);
+        // push the name and native object so they are detectable in case GC is triggered by the insertion
         self.push(Value::from(name.cast()));
         let native = self.new_obj(ObjNative::new(arity, function));
         self.push(Value::from(native));
         self.natives.insert(pre_hash, Value::from(native));
+        // Pop the name and native object from the stack as they are now safely in the table
         self.pop();
         self.pop();
     }
@@ -178,6 +180,7 @@ impl Vm {
         self.heap.sweep();
     }
 
+    /// Marks all allocated objects reachable through the global tables or the call stack.
     pub(crate) fn mark_roots(&mut self) {
         self.heap.mark_value(self.init_string);
 
@@ -207,10 +210,13 @@ impl Vm {
         }
     }
 
+    /// Frees all heap-allocated objects.
+    #[inline]
     pub fn free_objects(&mut self) {
         self.heap.free_objects();
     }
 
+    /// Clears all global variables and resets the stack
     fn reset(&mut self) {
         self.globals.clear();
         self.frame_count = 0;
@@ -218,6 +224,9 @@ impl Vm {
         self.open_upvalues = None;
     }
 
+    /// Takes a path to a single .lox file or a directory
+    /// If the path is to a directory, any .lox files in it or any of its sub-directories will be sequentially run.
+    /// Currently does not maintain global variables between each file run.
     pub fn run_file(&mut self, path: PathBuf) -> Result<()> {
         let mut files = vec![];
         let path = Path::new(&path);
@@ -243,18 +252,21 @@ impl Vm {
         Ok(())
     }
 
+    /// Runs a Lox REPL
+    /// Input must be entered one line at a time (no multi-line strings, even though Lox supports them)
+    /// Exits if an empty line is entered.
     pub fn run_prompt(&mut self) -> Result<()> {
         let mut input = String::new();
         loop {
             print!("> ");
             std::io::stdout().flush().expect("new prompt failed");
-            let start = input.len();
             if std::io::stdin().read_line(&mut input).is_ok() {
-                if matches!(&input[start..], "\r\n" | "\n") {
+                if matches!(input.as_str(), "\r\n" | "\n") {
                     break;
-                } else if let Err(e) = self.interpret(&input[start..]) {
+                } else if let Err(e) = self.interpret(&input) {
                     println!("{e}");
                 }
+                input.clear();
             }
         }
         Ok(())
@@ -331,6 +343,9 @@ impl Vm {
         }
     }
 
+    /// Returns a pointer to an ObjUpvalue.
+    /// If there is already an allocated Upvalue pointing to the desired local slot, returns a pointer to it
+    /// Otherwise, allocates a new one and adds it to the open upvalue list.
     fn capture_upvalue(&mut self, local: usize) -> *mut ObjUpvalue {
         unsafe {
             let mut prev = None;
@@ -361,6 +376,7 @@ impl Vm {
         }
     }
 
+    /// Closes over all open upvalues, storing the value within the ObjUpvalue itself rather than referencing a stack slot
     fn close_upvalues(&mut self, last: usize) {
         unsafe {
             while let Some(uv) = self.open_upvalues
@@ -600,10 +616,7 @@ impl Vm {
                     }
                     OpCode::GetSuper => {
                         let name = read_constant!();
-                        let superclass = self
-                            .pop()
-                            .as_obj()
-                            .ok_or(RuntimeError::BadSuperclass)?;
+                        let superclass = self.pop().as_obj().ok_or(RuntimeError::BadSuperclass)?;
                         self.bind_method(superclass.cast(), name)?;
                     }
                     OpCode::Equal => compare!(==),
@@ -611,6 +624,7 @@ impl Vm {
                     OpCode::GreaterEqual => compare!(>=),
                     OpCode::Less => compare!(<),
                     OpCode::LessEqual => compare!(<=),
+                    // Addition
                     OpCode::Add => {
                         let r = self.peek(0);
                         let l = self.peek(1);
@@ -671,10 +685,7 @@ impl Vm {
                     OpCode::SuperInvoke => {
                         let method = read_constant!();
                         let arg_count = read_byte!();
-                        let superclass = self
-                            .pop()
-                            .as_obj()
-                            .ok_or(RuntimeError::BadSuperclass)?;
+                        let superclass = self.pop().as_obj().ok_or(RuntimeError::BadSuperclass)?;
                         self.frames[self.frame_count - 1] = frame;
                         self.invoke_from_class(superclass.cast(), method, arg_count)?;
                         frame = self.frames[self.frame_count - 1];
@@ -737,9 +748,7 @@ impl Vm {
                     OpCode::Inherit => {
                         let superclass = self.peek(1);
                         let subclass = self.peek(0);
-                        let sup = superclass
-                            .as_obj()
-                            .ok_or(RuntimeError::BadSuperclass)?;
+                        let sup = superclass.as_obj().ok_or(RuntimeError::BadSuperclass)?;
                         let sub = subclass.as_obj().ok_or(RuntimeError::BadSubclass)?;
                         match (*sup.as_ptr()).kind {
                             ObjType::Class => {

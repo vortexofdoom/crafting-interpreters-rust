@@ -76,7 +76,7 @@ pub enum TokenType {
     LessEqual,
     // Literals
     Identifier,
-    Strng,
+    String,
     Number,
     // Keywords
     And,
@@ -120,7 +120,7 @@ impl From<Token<'_>> for TokenType {
             Token::Less => Self::Less,
             Token::LessEqual => Self::LessEqual,
             Token::Identifier(_) => Self::Identifier,
-            Token::String(_) => Self::Strng,
+            Token::String(_) => Self::String,
             Token::Number(_) => Self::Number,
             Token::And => Self::And,
             Token::Class => Self::Class,
@@ -165,7 +165,7 @@ impl std::fmt::Display for TokenType {
             TokenType::Less => "<",
             TokenType::LessEqual => "<=",
             TokenType::Identifier => "identifier",
-            TokenType::Strng => "string",
+            TokenType::String => "string",
             TokenType::Number => "number",
             TokenType::And => "and",
             TokenType::Class => "class",
@@ -220,6 +220,7 @@ impl<'a> Token<'a> {
         }
     }
 
+    // Checks for keywords, otherwise is an identifier
     fn from_str(source: &'a str) -> Self {
         let check = |s: &str| source.len() == s.len() + 1 && &source[1..] == s;
         let mut chars = source.bytes();
@@ -313,6 +314,8 @@ impl std::fmt::Display for ScanError {
     }
 }
 
+impl std::error::Error for ScanError {}
+
 #[derive(Debug)]
 pub struct Parsed<T>(pub (usize, usize), pub Result<T>);
 
@@ -346,7 +349,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
         .char_indices()
         .peekable()
         .batching(move |chars| {
-            use Token::*;
+            use Token as T;
             macro_rules! advance {
                 () => {{
                     col += 1;
@@ -366,7 +369,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                         return Some(Parsed((line, start), $res))
                     };
 
-                    ($c1:ident, $c2:ident) => {{
+                    ($c1:expr, $c2:expr) => {{
                         match chars.peek() {
                             Some((_, '=')) => {
                                 advance!();
@@ -380,7 +383,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                     '"' => {
                         while let Some((j, next)) = advance!() {
                             if next == '"' {
-                                pack!(Ok(String(&source[i + 1..j])));
+                                pack!(Ok(T::String(&source[i + 1..j])));
                             }
                         }
                         // if we reach this point it means we've reached the end of the source code
@@ -395,18 +398,19 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             }
                             continue;
                         }
-                        _ => pack!(Ok(Slash)),
+                        _ => pack!(Ok(T::Slash)),
                     },
                     // One or two character tokens
-                    '!' => pack!(BangEqual, Bang),
-                    '=' => pack!(EqualEqual, Equal),
-                    '>' => pack!(GreaterEqual, Greater),
-                    '<' => pack!(LessEqual, Less),
+                    '!' => pack!(T::BangEqual, T::Bang),
+                    '=' => pack!(T::EqualEqual, T::Equal),
+                    '>' => pack!(T::GreaterEqual, T::Greater),
+                    '<' => pack!(T::LessEqual, T::Less),
 
                     // Invariably single character tokens
                     c @ ('(' | ')' | '{' | '}' | ',' | '.' | '-' | '+' | ';' | '*') => {
                         pack!(Ok(Token::from_char(c)?))
                     }
+                    // Numbers
                     x if x.is_ascii_digit() => {
                         let mut end = i + 1;
                         while chars.peek().is_some_and(|(_, c)| c.is_ascii_digit()) {
@@ -414,6 +418,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             end += 1;
                         }
 
+                        // if the following character is '.', check to see if it should be included as the decimal portion
                         let mut clone = chars.clone();
                         if let Some((_, '.')) = clone.next() {
                             if clone.next().is_some_and(|(_, c)| c.is_ascii_digit()) {
@@ -431,6 +436,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             .map(Token::Number);
                         pack!(num);
                     }
+                    // Identifiers/Keywords
                     a if a == '_' || a.is_ascii_alphabetic() => {
                         let mut end = i + 1;
                         while chars
@@ -441,7 +447,7 @@ pub fn scan(source: &str) -> Peekable<impl Iterator<Item = Parsed<Token>>> {
                             advance!();
                         }
 
-                        pack!(Ok(Token::from_str(&source[i..end])));
+                        pack!(Ok(T::from_str(&source[i..end])));
                     }
                     w if w.is_whitespace() => continue,
                     c => pack!(Err(anyhow!(ScanError::UnrecognizedCharacter(c)))),
